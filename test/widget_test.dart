@@ -196,6 +196,11 @@ void main() {
     // Persistence: a fresh controller on the SAME db hydrates the survivor.
     final rows = await c.read(databaseProvider).allModels();
     expect(rows.single.name, 'Bracket v2');
+
+    await n.setThumbnail('a', '/thumbs/a.png');
+    expect(c.read(libraryControllerProvider).single.thumbnailPath, '/thumbs/a.png');
+    final rows2 = await c.read(databaseProvider).allModels();
+    expect(rows2.single.thumbnailPath, '/thumbs/a.png');
   });
 
   test('ModelFormat.fromExtension accepts obj/stl, rejects blend', () {

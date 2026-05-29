@@ -38,6 +38,11 @@ class PrismCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.prism;
     final radius = BorderRadius.circular(borderRadius);
+    // Blur only in dark mode: the light theme uses near-opaque glass, so the
+    // backdrop blur adds no visible effect but DOES re-sample the animating
+    // backdrop during the theme cross-fade (flicker) and costs perf.
+    final useBlur =
+        blur && Theme.of(context).brightness == Brightness.dark;
 
     Widget surface = DecoratedBox(
       decoration: BoxDecoration(
@@ -52,7 +57,7 @@ class PrismCard extends StatelessWidget {
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.18),
+            color: c.cardShadow,
             blurRadius: 24,
             offset: const Offset(0, 12),
           ),
@@ -88,7 +93,7 @@ class PrismCard extends StatelessWidget {
       ),
     );
 
-    if (blur) {
+    if (useBlur) {
       surface = BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
         child: surface,
