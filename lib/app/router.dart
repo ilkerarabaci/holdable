@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -23,9 +24,14 @@ final routerProvider = Provider<GoRouter>((ref) {
     redirect: (context, state) {
       final shown = ref.read(onboardingShownProvider);
       final atOnboarding = state.matchedLocation == Routes.onboarding;
-      if (!shown && !atOnboarding) return Routes.onboarding;
-      if (shown && atOnboarding) return Routes.library;
-      return null;
+      String? to;
+      if (!shown && !atOnboarding) {
+        to = Routes.onboarding;
+      } else if (shown && atOnboarding) {
+        to = Routes.library;
+      }
+      debugPrint('[holdable-nav] redirect loc=${state.matchedLocation} uri=${state.uri} -> ${to ?? "null"}');
+      return to;
     },
     routes: [
       GoRoute(
@@ -42,8 +48,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: Routes.viewer,
-        builder: (context, state) =>
-            ViewerScreen(model: state.extra as LibraryModel),
+        builder: (context, state) {
+          debugPrint('[holdable-nav] viewer builder extra=${state.extra.runtimeType}');
+          return ViewerScreen(model: state.extra as LibraryModel);
+        },
       ),
     ],
   );

@@ -153,7 +153,10 @@ class _ModelGrid extends ConsumerWidget {
           model: m,
           // Liquid-glass blur only while the set is small (perf guard).
           blur: models.length <= 6,
-          onTap: () => context.push(Routes.viewer, extra: m),
+          onTap: () {
+            debugPrint('[holdable-nav] card tap -> push viewer id=${m.id}');
+            context.push(Routes.viewer, extra: m);
+          },
           onLongPress: () => _showActions(context, ref, m),
         );
       },
