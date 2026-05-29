@@ -53,9 +53,35 @@ void main() {
     expect(c.read(onboardingShownProvider), true);
   });
 
-  testWidgets('first launch shows onboarding', (tester) async {
+  testWidgets('first launch shows onboarding (Continue, not Enter studio)',
+      (tester) async {
     await _pumpApp(tester, {});
+    expect(find.text('Continue'), findsOneWidget);
+    expect(find.text('Enter studio'), findsNothing);
+  });
+
+  testWidgets('onboarding advertises .obj/.stl, never .blend', (tester) async {
+    await _pumpApp(tester, {});
+    // Page 2 carries the format chips.
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    expect(find.text('.OBJ'), findsOneWidget);
+    expect(find.text('.STL'), findsOneWidget);
+    expect(find.textContaining('more formats soon'), findsOneWidget);
+    expect(find.textContaining('.blend'), findsNothing);
+  });
+
+  testWidgets('reaching last pane shows Enter studio; tapping enters library',
+      (tester) async {
+    await _pumpApp(tester, {});
+    await tester.tap(find.text('Continue')); // -> pane 2
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue')); // -> pane 3
+    await tester.pumpAndSettle();
     expect(find.text('Enter studio'), findsOneWidget);
+    await tester.tap(find.text('Enter studio'));
+    await tester.pumpAndSettle();
+    expect(find.text('Your shelf is empty.'), findsOneWidget);
   });
 
   testWidgets('returning user lands on empty library', (tester) async {
