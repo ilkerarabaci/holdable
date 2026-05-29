@@ -7,10 +7,47 @@ import '../../../app/router.dart';
 import '../../../app/theme/prism_colors.dart';
 import '../../../app/theme_controller.dart';
 import '../../import/data/import_service.dart';
+import '../../import/data/sample_models.dart';
 import '../../import/presentation/import_sheet.dart';
 import '../data/library_controller.dart';
 import '../domain/library_model.dart';
 import 'model_card.dart';
+
+/// Lets the user pick a bundled sample model, then imports it.
+Future<void> _pickSample(BuildContext context, WidgetRef ref) async {
+  final selected = await showModalBottomSheet<SampleModel>(
+    context: context,
+    backgroundColor: Theme.of(context).colorScheme.surface,
+    builder: (_) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 16, 20, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text('Sample models'),
+            ),
+          ),
+          for (final s in kSampleModels)
+            ListTile(
+              leading: const Icon(LucideIcons.box),
+              title: Text(s.name),
+              onTap: () => Navigator.pop(context, s),
+            ),
+        ],
+      ),
+    ),
+  );
+  if (selected == null || !context.mounted) return;
+  final result =
+      await ref.read(importServiceProvider).importAsset(selected.asset, selected.name);
+  if (!context.mounted) return;
+  if (result.status == ImportStatus.added) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('Added "${result.model!.name}"')));
+  }
+}
 
 /// Runs the file-picker import and shows feedback. Shared by the FAB and the
 /// import sheet's "Files" row.
@@ -61,6 +98,7 @@ class LibraryScreen extends ConsumerWidget {
         onPressed: () => ImportSheet.show(
           context,
           onPickFiles: () => _runImport(context, ref),
+          onPickSamples: () => _pickSample(context, ref),
         ),
         child: const Icon(LucideIcons.plus),
       ),

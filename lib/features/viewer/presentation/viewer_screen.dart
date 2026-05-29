@@ -21,7 +21,7 @@ class ViewerScreen extends StatefulWidget {
   State<ViewerScreen> createState() => _ViewerScreenState();
 }
 
-enum _Tab { view, info }
+enum _Tab { view, render, info }
 
 class _ViewerScreenState extends State<ViewerScreen> {
   late final WebViewController _controller;
@@ -67,6 +67,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
     } catch (_) {/* ignore non-JSON */}
   }
 
+  void _setMode(String mode) =>
+      _controller.runJavaScript("window.setRenderMode('$mode')");
+  void _setView(String which) =>
+      _controller.runJavaScript("window.setView('$which')");
+
   Future<void> _sendModel() async {
     try {
       final bytes = await File(widget.model.filePath).readAsBytes();
@@ -105,14 +110,19 @@ class _ViewerScreenState extends State<ViewerScreen> {
                 ),
               ),
             ),
-          if (_tab == _Tab.info) Positioned(left: 0, right: 0, bottom: 0, child: _InfoPanel(
-            model: widget.model, tris: _tris, verts: _verts, ms: _ms,
-          )),
+          if (_tab == _Tab.view)
+            Positioned(left: 0, right: 0, bottom: 0, child: _PresetPanel(onView: _setView)),
+          if (_tab == _Tab.render)
+            Positioned(left: 0, right: 0, bottom: 0, child: _RenderPanel(onMode: _setMode)),
+          if (_tab == _Tab.info)
+            Positioned(left: 0, right: 0, bottom: 0, child: _InfoPanel(
+              model: widget.model, tris: _tris, verts: _verts, ms: _ms,
+            )),
         ],
       ),
       bottomNavigationBar: _Toolbar(
         current: _tab,
-        onSelect: (t) => setState(() => _tab = t == _tab ? _Tab.view : t),
+        onSelect: (t) => setState(() => _tab = t),
       ),
     );
   }
@@ -136,7 +146,7 @@ class _Toolbar extends StatelessWidget {
             _ToolButton(icon: LucideIcons.move3d, label: 'View',
                 active: current == _Tab.view, onTap: () => onSelect(_Tab.view)),
             _ToolButton(icon: LucideIcons.palette, label: 'Render',
-                disabled: true, badge: 'SOON'),
+                active: current == _Tab.render, onTap: () => onSelect(_Tab.render)),
             _ToolButton(icon: LucideIcons.info, label: 'Info',
                 active: current == _Tab.info, onTap: () => onSelect(_Tab.info)),
             _ToolButton(icon: LucideIcons.scan, label: 'AR',
@@ -191,6 +201,92 @@ class _ToolButton extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Shared dark panel chrome for the viewer's bottom overlays.
+class _Panel extends StatelessWidget {
+  const _Panel({required this.label, required this.child});
+  final String label;
+  final Widget child;
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: const Color(0xCC16161A),
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label,
+                style: const TextStyle(
+                    fontFamily: 'monospace', fontSize: 11, letterSpacing: 1,
+                    color: Color(0xFF8A8A95))),
+            const SizedBox(height: 12),
+            child,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Chip extends StatelessWidget {
+  const _Chip({required this.label, required this.onTap});
+  final String label;
+  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) {
+    return OutlinedButton(
+      onPressed: onTap,
+      style: OutlinedButton.styleFrom(
+        foregroundColor: const Color(0xFFF5F5F7),
+        side: const BorderSide(color: Color(0x33FFFFFF)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+      ),
+      child: Text(label),
+    );
+  }
+}
+
+class _PresetPanel extends StatelessWidget {
+  const _PresetPanel({required this.onView});
+  final ValueChanged<String> onView;
+  @override
+  Widget build(BuildContext context) {
+    return _Panel(
+      label: 'VIEW',
+      child: Wrap(
+        spacing: 10,
+        children: [
+          _Chip(label: 'Front', onTap: () => onView('front')),
+          _Chip(label: 'Top', onTap: () => onView('top')),
+          _Chip(label: 'Side', onTap: () => onView('side')),
+          _Chip(label: 'Iso', onTap: () => onView('iso')),
+        ],
+      ),
+    );
+  }
+}
+
+class _RenderPanel extends StatelessWidget {
+  const _RenderPanel({required this.onMode});
+  final ValueChanged<String> onMode;
+  @override
+  Widget build(BuildContext context) {
+    return _Panel(
+      label: 'RENDER',
+      child: Wrap(
+        spacing: 10,
+        children: [
+          _Chip(label: 'Solid', onTap: () => onMode('solid')),
+          _Chip(label: 'Wireframe', onTap: () => onMode('wireframe')),
+          _Chip(label: 'X-ray', onTap: () => onMode('xray')),
+        ],
       ),
     );
   }
