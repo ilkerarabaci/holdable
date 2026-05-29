@@ -14,4 +14,5 @@ const kSampleModels = <SampleModel>[
   SampleModel(name: 'Icosahedron', asset: 'assets/sample_models/icosahedron.stl'),
   SampleModel(name: 'Hex pendant', asset: 'assets/sample_models/hex_pendant.stl'),
   SampleModel(name: 'Lamp shade', asset: 'assets/sample_models/lamp_shade.stl'),
+  SampleModel(name: 'Cube (OBJ)', asset: 'assets/sample_models/cube.obj'),
 ];
