@@ -133,6 +133,17 @@ function countTris(obj) {
   return { tris: Math.round(tris), verts };
 }
 
+// Chunked transfer for large files: Dart appends base64 chunks (each well
+// under Android's ~1MB binder limit), then calls loadChunked to assemble +
+// parse. A single huge runJavaScript arg would throw TransactionTooLargeException.
+window.__chunks = [];
+window.appendChunk = function (s) { window.__chunks.push(s); };
+window.loadChunked = function (format) {
+  const b64 = window.__chunks.join('');
+  window.__chunks = [];
+  window.loadModel(format, b64);
+};
+
 // Called from Dart: window.loadModel('stl'|'obj', base64String)
 window.loadModel = function (format, b64) {
   try {

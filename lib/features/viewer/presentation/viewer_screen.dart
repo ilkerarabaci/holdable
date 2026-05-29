@@ -96,9 +96,15 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     try {
       final bytes = await File(widget.model.filePath).readAsBytes();
       final b64 = base64Encode(bytes);
-      await _controller.runJavaScript(
-        "window.loadModel('${widget.model.format.name}', '$b64')",
-      );
+      // Send in 256KB chunks — a single arg this large trips Android's binder
+      // limit (TransactionTooLargeException) on big models. base64 is quote/
+      // backslash-free, so it embeds safely in a single-quoted JS literal.
+      const chunkSize = 256 * 1024;
+      for (var i = 0; i < b64.length; i += chunkSize) {
+        final end = (i + chunkSize < b64.length) ? i + chunkSize : b64.length;
+        await _controller.runJavaScript("window.appendChunk('${b64.substring(i, end)}')");
+      }
+      await _controller.runJavaScript("window.loadChunked('${widget.model.format.name}')");
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     }
