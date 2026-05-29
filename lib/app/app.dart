@@ -37,10 +37,12 @@ class _HoldableAppState extends ConsumerState<HoldableApp> {
       theme: PrismTheme.light,
       darkTheme: PrismTheme.dark,
       themeMode: mode,
-      // 350ms cross-fade between token values on theme switch
-      // (docs/design-handoff.md §Interactions).
-      themeAnimationDuration: const Duration(milliseconds: 350),
-      themeAnimationCurve: Curves.easeInOut,
+      // Instant theme switch. MaterialApp's cross-fade renders the old and new
+      // themes stacked and fades between them, which for a full dark<->light
+      // flip passes through a muddy grey mid-frame that reads as a glitch.
+      // (The design-handoff's "350ms cross-fade" needs a custom reveal; a clean
+      // instant swap is the stable choice for alpha.)
+      themeAnimationDuration: Duration.zero,
       routerConfig: router,
     );
   }
