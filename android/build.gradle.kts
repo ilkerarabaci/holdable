@@ -35,10 +35,19 @@ subprojects {
             } catch (e: Exception) {
                 logger.warn("compileSdk 36 not set for ${project.name}: ${e.message}")
             }
-        }
-        tasks.withType<JavaCompile>().configureEach {
-            sourceCompatibility = JavaVersion.VERSION_17.toString()
-            targetCompatibility = JavaVersion.VERSION_17.toString()
+            // Set Java 17 at the AGP extension level (authoritative — task-level
+            // overrides get clobbered by AGP). compileOptions setters take Object.
+            try {
+                val compileOptions = android.javaClass.getMethod("getCompileOptions").invoke(android)
+                compileOptions.javaClass
+                    .getMethod("setSourceCompatibility", Any::class.java)
+                    .invoke(compileOptions, JavaVersion.VERSION_17)
+                compileOptions.javaClass
+                    .getMethod("setTargetCompatibility", Any::class.java)
+                    .invoke(compileOptions, JavaVersion.VERSION_17)
+            } catch (e: Exception) {
+                logger.warn("Java 17 not set for ${project.name}: ${e.message}")
+            }
         }
     }
 }
