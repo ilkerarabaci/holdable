@@ -17,22 +17,14 @@ class Routes {
   static const viewer = '/viewer';
 }
 
-/// App router. Redirects to onboarding on first launch, then to the library.
+/// App router. The onboarding gate is the INITIAL location (computed from the
+/// persisted flag) rather than a global `redirect` — a top-level redirect runs
+/// on every navigation and was swallowing imperative pops, trapping the user
+/// in pushed routes (e.g. the viewer). No redirect = clean push/pop.
 final routerProvider = Provider<GoRouter>((ref) {
+  final shown = ref.read(onboardingShownProvider);
   return GoRouter(
-    initialLocation: Routes.library,
-    redirect: (context, state) {
-      final shown = ref.read(onboardingShownProvider);
-      final atOnboarding = state.matchedLocation == Routes.onboarding;
-      String? to;
-      if (!shown && !atOnboarding) {
-        to = Routes.onboarding;
-      } else if (shown && atOnboarding) {
-        to = Routes.library;
-      }
-      debugPrint('[holdable-nav] redirect loc=${state.matchedLocation} uri=${state.uri} -> ${to ?? "null"}');
-      return to;
-    },
+    initialLocation: shown ? Routes.library : Routes.onboarding,
     routes: [
       GoRoute(
         path: Routes.onboarding,
