@@ -1,0 +1,249 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+
+import '../../../app/theme/prism_colors.dart';
+import '../../library/domain/library_model.dart';
+
+/// Interactive 3D viewer. Renders the model in a WebView running a bundled
+/// three.js scene (OBJ/STL loaders, OrbitControls). Model bytes are passed to
+/// JS as base64 over a channel — no CORS, no local server. Large-file chunking
+/// is a follow-up (alpha budget: 50MB STL < 3s).
+class ViewerScreen extends StatefulWidget {
+  const ViewerScreen({super.key, required this.model});
+
+  final LibraryModel model;
+
+  @override
+  State<ViewerScreen> createState() => _ViewerScreenState();
+}
+
+enum _Tab { view, info }
+
+class _ViewerScreenState extends State<ViewerScreen> {
+  late final WebViewController _controller;
+  _Tab _tab = _Tab.view;
+  bool _loading = true;
+  String? _error;
+  int? _tris;
+  int? _verts;
+  int? _ms;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(const Color(0xFF0E0E10))
+      ..addJavaScriptChannel('ModelChannel', onMessageReceived: _onMessage)
+      ..loadFlutterAsset('assets/3d-engine/viewer.html');
+  }
+
+  Future<void> _onMessage(JavaScriptMessage message) async {
+    final raw = message.message;
+    if (raw == 'ready') {
+      await _sendModel();
+      return;
+    }
+    try {
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+      if (!mounted) return;
+      if (data['type'] == 'loaded') {
+        setState(() {
+          _loading = false;
+          _tris = (data['tris'] as num?)?.toInt();
+          _verts = (data['verts'] as num?)?.toInt();
+          _ms = (data['ms'] as num?)?.toInt();
+        });
+      } else if (data['type'] == 'error') {
+        setState(() {
+          _loading = false;
+          _error = data['message'] as String? ?? 'Failed to render';
+        });
+      }
+    } catch (_) {/* ignore non-JSON */}
+  }
+
+  Future<void> _sendModel() async {
+    try {
+      final bytes = await File(widget.model.filePath).readAsBytes();
+      final b64 = base64Encode(bytes);
+      await _controller.runJavaScript(
+        "window.loadModel('${widget.model.format.name}', '$b64')",
+      );
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.prism;
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E0E10),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0E0E10),
+        foregroundColor: const Color(0xFFF5F5F7),
+        title: Text(widget.model.name),
+      ),
+      body: Stack(
+        children: [
+          Positioned.fill(child: WebViewWidget(controller: _controller)),
+          if (_loading && _error == null)
+            const Center(child: CircularProgressIndicator()),
+          if (_error != null)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(32),
+                child: Text(
+                  "Couldn't render this model.",
+                  style: TextStyle(color: c.textMuted),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+          if (_tab == _Tab.info) Positioned(left: 0, right: 0, bottom: 0, child: _InfoPanel(
+            model: widget.model, tris: _tris, verts: _verts, ms: _ms,
+          )),
+        ],
+      ),
+      bottomNavigationBar: _Toolbar(
+        current: _tab,
+        onSelect: (t) => setState(() => _tab = t == _tab ? _Tab.view : t),
+      ),
+    );
+  }
+}
+
+class _Toolbar extends StatelessWidget {
+  const _Toolbar({required this.current, required this.onSelect});
+  final _Tab current;
+  final ValueChanged<_Tab> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: const Color(0xFF16161A),
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: SafeArea(
+        top: false,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _ToolButton(icon: LucideIcons.move3d, label: 'View',
+                active: current == _Tab.view, onTap: () => onSelect(_Tab.view)),
+            _ToolButton(icon: LucideIcons.palette, label: 'Render',
+                disabled: true, badge: 'SOON'),
+            _ToolButton(icon: LucideIcons.info, label: 'Info',
+                active: current == _Tab.info, onTap: () => onSelect(_Tab.info)),
+            _ToolButton(icon: LucideIcons.scan, label: 'AR',
+                disabled: true, badge: 'SOON'),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ToolButton extends StatelessWidget {
+  const _ToolButton({
+    required this.icon,
+    required this.label,
+    this.active = false,
+    this.disabled = false,
+    this.badge,
+    this.onTap,
+  });
+  final IconData icon;
+  final String label;
+  final bool active;
+  final bool disabled;
+  final String? badge;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    const muted = Color(0xFF6B6B73);
+    final color = disabled
+        ? muted
+        : (active ? const Color(0xFF8B6CFF) : const Color(0xFFF5F5F7));
+    return InkWell(
+      onTap: disabled ? null : onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 22, color: color),
+            const SizedBox(height: 4),
+            Text(
+              badge ?? label,
+              style: TextStyle(
+                fontSize: badge != null ? 9 : 11,
+                color: color,
+                fontFamily: badge != null ? 'monospace' : null,
+                letterSpacing: badge != null ? 0.5 : 0,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _InfoPanel extends StatelessWidget {
+  const _InfoPanel({required this.model, this.tris, this.verts, this.ms});
+  final LibraryModel model;
+  final int? tris;
+  final int? verts;
+  final int? ms;
+
+  @override
+  Widget build(BuildContext context) {
+    String n(int? v) => v == null ? '—' : v.toString();
+    final rows = <List<String>>[
+      ['FORMAT', model.format.label],
+      ['VERTICES', n(verts)],
+      ['TRIANGLES', n(tris)],
+      ['PARSE', ms == null ? '—' : '${ms}ms'],
+    ];
+    return Container(
+      color: const Color(0xCC16161A),
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final r in rows)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(r[0],
+                        style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            letterSpacing: 1,
+                            color: Color(0xFF8A8A95))),
+                    Text(r[1],
+                        style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 13,
+                            color: Color(0xFFF5F5F7))),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}

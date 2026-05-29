@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0E0E10; }
+  #c { width: 100vw; height: 100vh; display: block; touch-action: none; }
+  #status {
+    position: fixed; left: 0; right: 0; bottom: 16px; text-align: center;
+    font-family: ui-monospace, monospace; font-size: 12px; color: #8A8A95;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="status">loading engine…</div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+const statusEl = document.getElementById('status');
+function post(msg) { try { ModelChannel.postMessage(msg); } catch (e) {} }
+function setStatus(s) { statusEl.textContent = s; }
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0E0E10);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 5000);
+camera.position.set(0, 0, 5);
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 1.2;
+// Stop auto-spin on interaction, resume after idle.
+let idleTimer = null;
+controls.addEventListener('start', () => {
+  controls.autoRotate = false;
+  if (idleTimer) clearTimeout(idleTimer);
+});
+controls.addEventListener('end', () => {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => { controls.autoRotate = true; }, 1400);
+});
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1.1));
+const key = new THREE.DirectionalLight(0xffffff, 1.4);
+key.position.set(3, 5, 4);
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x8B6CFF, 0.5);
+rim.position.set(-4, -2, -3);
+scene.add(rim);
+
+let current = null;
+const material = new THREE.MeshStandardMaterial({
+  color: 0xd8d8de, metalness: 0.1, roughness: 0.55, flatShading: false,
+});
+
+function frameObject(obj) {
+  const box = new THREE.Box3().setFromObject(obj);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  obj.position.sub(center); // center at origin
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  const dist = maxDim / (2 * Math.tan((Math.PI * camera.fov) / 360));
+  camera.position.set(0, 0, dist * 1.6);
+  camera.near = maxDim / 100;
+  camera.far = maxDim * 100;
+  camera.updateProjectionMatrix();
+  controls.target.set(0, 0, 0);
+  controls.update();
+  return { size, maxDim };
+}
+
+function countTris(obj) {
+  let tris = 0, verts = 0;
+  obj.traverse((ch) => {
+    if (ch.isMesh && ch.geometry) {
+      const g = ch.geometry;
+      const pos = g.attributes.position;
+      verts += pos ? pos.count : 0;
+      tris += g.index ? g.index.count / 3 : (pos ? pos.count / 3 : 0);
+    }
+  });
+  return { tris: Math.round(tris), verts };
+}
+
+// Called from Dart: window.loadModel('stl'|'obj', base64String)
+window.loadModel = function (format, b64) {
+  try {
+    setStatus('parsing ' + format + '…');
+    const bin = atob(b64);
+    const len = bin.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+
+    if (current) { scene.remove(current); current = null; }
+    const t0 = performance.now();
+    let obj;
+    if (format === 'stl') {
+      const geom = new STLLoader().parse(bytes.buffer);
+      geom.computeVertexNormals();
+      obj = new THREE.Mesh(geom, material);
+    } else {
+      const text = new TextDecoder().decode(bytes);
+      obj = new OBJLoader().parse(text);
+      obj.traverse((ch) => { if (ch.isMesh) ch.material = material; });
+    }
+    scene.add(obj);
+    current = obj;
+    const { maxDim } = frameObject(obj);
+    const stats = countTris(obj);
+    const ms = Math.round(performance.now() - t0);
+    setStatus('');
+    post(JSON.stringify({ type: 'loaded', tris: stats.tris, verts: stats.verts, ms }));
+  } catch (e) {
+    setStatus('failed to render');
+    post(JSON.stringify({ type: 'error', message: '' + e }));
+  }
+};
+
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w || canvas.height !== h) {
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+}
+function animate() {
+  resize();
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+animate();
+setStatus('ready');
+post('ready');
+</script>
+</body>
+</html>
