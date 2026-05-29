@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -76,6 +77,38 @@ class ImportService {
         name: _baseName(displayName ?? path.split(Platform.pathSeparator).last),
         format: format,
         sizeBytes: size ?? source.lengthSync(),
+        filePath: dest,
+        importedAt: now,
+      );
+      await ref.read(libraryControllerProvider.notifier).add(model);
+      return ImportResult(ImportStatus.added, model: model);
+    } catch (e) {
+      return ImportResult(ImportStatus.error, message: '$e');
+    }
+  }
+
+  /// Imports a bundled CC0 sample model (from assets/sample_models/) into the
+  /// wallet — used by the import sheet's "Sample models" option.
+  Future<ImportResult> importAsset(String assetPath, String displayName) async {
+    final format = ModelFormat.fromExtension(_ext(assetPath));
+    if (format == null) return const ImportResult(ImportStatus.unsupported);
+    try {
+      final data = await rootBundle.load(assetPath);
+      final bytes = data.buffer.asUint8List();
+      final docs = await getApplicationDocumentsDirectory();
+      final modelsDir = Directory('${docs.path}/models');
+      if (!modelsDir.existsSync()) modelsDir.createSync(recursive: true);
+
+      final now = DateTime.now();
+      final id = now.microsecondsSinceEpoch.toString();
+      final dest = '${modelsDir.path}/$id.${format.name}';
+      await File(dest).writeAsBytes(bytes);
+
+      final model = LibraryModel(
+        id: id,
+        name: displayName,
+        format: format,
+        sizeBytes: bytes.length,
         filePath: dest,
         importedAt: now,
       );

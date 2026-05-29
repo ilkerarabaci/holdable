@@ -1,0 +1,14 @@
+/// Bundled CC0 sample models surfaced in the import sheet's "Sample models"
+/// option. Simple procedurally-generated polyhedra so first-run users have
+/// something to view immediately (assets/sample_models/).
+class SampleModel {
+  const SampleModel({required this.name, required this.asset});
+  final String name;
+  final String asset;
+}
+
+const kSampleModels = <SampleModel>[
+  SampleModel(name: 'Cube', asset: 'assets/sample_models/cube.stl'),
+  SampleModel(name: 'Tetrahedron', asset: 'assets/sample_models/tetrahedron.stl'),
+  SampleModel(name: 'Octahedron', asset: 'assets/sample_models/octahedron.stl'),
+];

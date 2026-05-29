@@ -66,9 +66,37 @@ rim.position.set(-4, -2, -3);
 scene.add(rim);
 
 let current = null;
+let fitDist = 5;
 const material = new THREE.MeshStandardMaterial({
   color: 0xd8d8de, metalness: 0.1, roughness: 0.55, flatShading: false,
 });
+
+// Render modes (product-spec: Solid / Wireframe / X-ray).
+window.setRenderMode = function (mode) {
+  if (mode === 'wireframe') {
+    material.wireframe = true; material.transparent = false; material.opacity = 1;
+    material.depthWrite = true;
+  } else if (mode === 'xray') {
+    material.wireframe = false; material.transparent = true; material.opacity = 0.35;
+    material.depthWrite = false;
+  } else { // solid
+    material.wireframe = false; material.transparent = false; material.opacity = 1;
+    material.depthWrite = true;
+  }
+  material.needsUpdate = true;
+};
+
+// Preset camera views.
+window.setView = function (which) {
+  const d = fitDist;
+  controls.autoRotate = false;
+  if (which === 'top') camera.position.set(0, d, 0.0001);
+  else if (which === 'side') camera.position.set(d, 0, 0);
+  else if (which === 'iso') camera.position.set(d * 0.6, d * 0.6, d * 0.6);
+  else camera.position.set(0, 0, d); // front
+  controls.target.set(0, 0, 0);
+  controls.update();
+};
 
 function frameObject(obj) {
   const box = new THREE.Box3().setFromObject(obj);
@@ -77,7 +105,8 @@ function frameObject(obj) {
   obj.position.sub(center); // center at origin
   const maxDim = Math.max(size.x, size.y, size.z) || 1;
   const dist = maxDim / (2 * Math.tan((Math.PI * camera.fov) / 360));
-  camera.position.set(0, 0, dist * 1.6);
+  fitDist = dist * 1.6;
+  camera.position.set(0, 0, fitDist);
   camera.near = maxDim / 100;
   camera.far = maxDim * 100;
   camera.updateProjectionMatrix();

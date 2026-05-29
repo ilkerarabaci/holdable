@@ -10,6 +10,7 @@ import 'package:holdable/features/library/data/library_controller.dart';
 import 'package:holdable/features/library/domain/library_model.dart';
 import 'package:holdable/features/library/presentation/model_card.dart';
 import 'package:holdable/features/import/data/import_service.dart';
+import 'package:holdable/features/import/data/sample_models.dart';
 import 'package:holdable/features/onboarding/data/onboarding_controller.dart';
 import 'package:holdable/shared/crash/crash_reporter.dart';
 import 'package:holdable/shared/utils/format.dart';
@@ -218,6 +219,14 @@ void main() {
       '/in/photo.png',
     ]);
     expect(kept, ['/in/cube.obj', '/in/bracket.STL']);
+  });
+
+  test('sample catalog is non-empty and all .stl/.obj', () {
+    expect(kSampleModels, isNotEmpty);
+    for (final s in kSampleModels) {
+      expect(s.asset, startsWith('assets/sample_models/'));
+      expect(ModelFormat.fromExtension(s.asset.split('.').last), isNotNull);
+    }
   });
 
   test('NoopCrashReporter records without throwing', () {
