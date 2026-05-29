@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -40,10 +39,8 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: Routes.viewer,
-        builder: (context, state) {
-          debugPrint('[holdable-nav] viewer builder extra=${state.extra.runtimeType}');
-          return ViewerScreen(model: state.extra as LibraryModel);
-        },
+        builder: (context, state) =>
+            ViewerScreen(model: state.extra as LibraryModel),
       ),
     ],
   );
