@@ -33,7 +33,9 @@ function post(msg) { try { ModelChannel.postMessage(msg); } catch (e) {} }
 function setStatus(s) { statusEl.textContent = s; }
 
 const canvas = document.getElementById('c');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+const renderer = new THREE.WebGLRenderer({
+  canvas, antialias: true, preserveDrawingBuffer: true,
+});
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0E0E10);
@@ -156,11 +158,31 @@ window.loadModel = function (format, b64) {
     const ms = Math.round(performance.now() - t0);
     setStatus('');
     post(JSON.stringify({ type: 'loaded', tris: stats.tris, verts: stats.verts, ms }));
+    // Capture a 256px thumbnail once the first frame is on screen.
+    setTimeout(captureThumb, 250);
   } catch (e) {
     setStatus('failed to render');
     post(JSON.stringify({ type: 'error', message: '' + e }));
   }
 };
+
+// Renders into a 256x256 offscreen canvas and posts a base64 PNG thumbnail.
+function captureThumb() {
+  try {
+    renderer.render(scene, camera);
+    const tc = document.createElement('canvas');
+    tc.width = 256; tc.height = 256;
+    const ctx = tc.getContext('2d');
+    ctx.fillStyle = '#0E0E10';
+    ctx.fillRect(0, 0, 256, 256);
+    const side = Math.min(canvas.width, canvas.height);
+    const sx = (canvas.width - side) / 2;
+    const sy = (canvas.height - side) / 2;
+    ctx.drawImage(canvas, sx, sy, side, side, 0, 0, 256, 256);
+    const url = tc.toDataURL('image/png');
+    post(JSON.stringify({ type: 'thumb', data: url.split(',')[1] }));
+  } catch (e) {/* thumbnail is best-effort */}
+}
 
 function resize() {
   const w = canvas.clientWidth, h = canvas.clientHeight;

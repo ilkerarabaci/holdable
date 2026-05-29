@@ -38,4 +38,8 @@ class AppDatabase extends _$AppDatabase {
   Future<void> renameById(String id, String name) =>
       (update(models)..where((m) => m.id.equals(id)))
           .write(ModelsCompanion(name: Value(name)));
+
+  Future<void> setThumbnailById(String id, String path) =>
+      (update(models)..where((m) => m.id.equals(id)))
+          .write(ModelsCompanion(thumbnailPath: Value(path)));
 }

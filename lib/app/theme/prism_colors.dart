@@ -17,6 +17,7 @@ class PrismColors extends ThemeExtension<PrismColors> {
     required this.borderHairline,
     required this.glass1,
     required this.glass2,
+    required this.cardShadow,
   });
 
   final Color bg;
@@ -29,6 +30,10 @@ class PrismColors extends ThemeExtension<PrismColors> {
   final Color glass1;
   final Color glass2;
 
+  /// Card drop shadow — softer in light mode (a heavy dark halo on the cream
+  /// background reads as a rendering glitch).
+  final Color cardShadow;
+
   static const dark = PrismColors(
     bg: Color(0xFF0E0E10),
     surface: Color(0xFF1A1A1F),
@@ -37,6 +42,7 @@ class PrismColors extends ThemeExtension<PrismColors> {
     borderHairline: Color(0x14FFFFFF), // rgba(255,255,255,0.08)
     glass1: Color(0x0AFFFFFF), // rgba(255,255,255,0.04)
     glass2: Color(0x05FFFFFF), // rgba(255,255,255,0.02)
+    cardShadow: Color(0x2E000000), // black 0.18
   );
 
   static const light = PrismColors(
@@ -45,8 +51,9 @@ class PrismColors extends ThemeExtension<PrismColors> {
     textPrimary: Color(0xFF1A1A1C),
     textMuted: Color(0xFF5A5A5E),
     borderHairline: Color(0x14000000), // rgba(0,0,0,0.08)
-    glass1: Color(0xD9FFFFFF), // rgba(255,255,255,0.85)
-    glass2: Color(0x99FFFFFF), // rgba(255,255,255,0.6)
+    glass1: Color(0xFFFFFFFF), // opaque white (no blur in light — see PrismCard)
+    glass2: Color(0xF2FFFFFF), // rgba(255,255,255,0.95)
+    cardShadow: Color(0x14000000), // black 0.08 — soft
   );
 
   @override
@@ -58,6 +65,7 @@ class PrismColors extends ThemeExtension<PrismColors> {
     Color? borderHairline,
     Color? glass1,
     Color? glass2,
+    Color? cardShadow,
   }) {
     return PrismColors(
       bg: bg ?? this.bg,
@@ -67,6 +75,7 @@ class PrismColors extends ThemeExtension<PrismColors> {
       borderHairline: borderHairline ?? this.borderHairline,
       glass1: glass1 ?? this.glass1,
       glass2: glass2 ?? this.glass2,
+      cardShadow: cardShadow ?? this.cardShadow,
     );
   }
 
@@ -81,6 +90,7 @@ class PrismColors extends ThemeExtension<PrismColors> {
       borderHairline: Color.lerp(borderHairline, other.borderHairline, t)!,
       glass1: Color.lerp(glass1, other.glass1, t)!,
       glass2: Color.lerp(glass2, other.glass2, t)!,
+      cardShadow: Color.lerp(cardShadow, other.cardShadow, t)!,
     );
   }
 }

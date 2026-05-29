@@ -2,28 +2,31 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../../app/theme/prism_colors.dart';
+import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
 
 /// Interactive 3D viewer. Renders the model in a WebView running a bundled
 /// three.js scene (OBJ/STL loaders, OrbitControls). Model bytes are passed to
 /// JS as base64 over a channel — no CORS, no local server. Large-file chunking
 /// is a follow-up (alpha budget: 50MB STL < 3s).
-class ViewerScreen extends StatefulWidget {
+class ViewerScreen extends ConsumerStatefulWidget {
   const ViewerScreen({super.key, required this.model});
 
   final LibraryModel model;
 
   @override
-  State<ViewerScreen> createState() => _ViewerScreenState();
+  ConsumerState<ViewerScreen> createState() => _ViewerScreenState();
 }
 
 enum _Tab { view, render, info }
 
-class _ViewerScreenState extends State<ViewerScreen> {
+class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   late final WebViewController _controller;
   _Tab _tab = _Tab.view;
   bool _loading = true;
@@ -63,8 +66,25 @@ class _ViewerScreenState extends State<ViewerScreen> {
           _loading = false;
           _error = data['message'] as String? ?? 'Failed to render';
         });
+      } else if (data['type'] == 'thumb') {
+        await _saveThumbnail(data['data'] as String);
       }
     } catch (_) {/* ignore non-JSON */}
+  }
+
+  /// Persists the base64 PNG thumbnail captured by the viewer and points the
+  /// library model at it (shown on the card next time).
+  Future<void> _saveThumbnail(String b64) async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final thumbsDir = Directory('${docs.path}/thumbs');
+      if (!thumbsDir.existsSync()) thumbsDir.createSync(recursive: true);
+      final path = '${thumbsDir.path}/${widget.model.id}.png';
+      await File(path).writeAsBytes(base64Decode(b64));
+      await ref
+          .read(libraryControllerProvider.notifier)
+          .setThumbnail(widget.model.id, path);
+    } catch (_) {/* best-effort */}
   }
 
   void _setMode(String mode) =>

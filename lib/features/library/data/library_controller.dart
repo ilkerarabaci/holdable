@@ -70,6 +70,14 @@ class LibraryController extends Notifier<List<LibraryModel>> {
     ];
     await _db.renameById(id, name);
   }
+
+  Future<void> setThumbnail(String id, String path) async {
+    state = [
+      for (final m in state)
+        m.id == id ? m.copyWith(thumbnailPath: path) : m,
+    ];
+    await _db.setThumbnailById(id, path);
+  }
 }
 
 final libraryControllerProvider =

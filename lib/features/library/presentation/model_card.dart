@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -66,7 +68,20 @@ class _ThumbPlaceholder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // D4 will render the generated thumbnail when present.
+    final path = thumbnailPath;
+    if (path != null && File(path).existsSync()) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Image.file(
+          File(path),
+          fit: BoxFit.cover,
+          width: double.infinity,
+          height: double.infinity,
+          gaplessPlayback: true,
+        ),
+      );
+    }
+    // Placeholder gradient mark until a thumbnail is generated (on first view).
     return ShaderMask(
       blendMode: BlendMode.srcIn,
       shaderCallback: (b) => PrismGradient.diagonal.createShader(
