@@ -6,7 +6,9 @@ plugins {
 
 android {
     namespace = "app.holdable"
-    compileSdk = flutter.compileSdkVersion
+    // flutter_plugin_android_lifecycle (via file_picker) requires compileSdk 36;
+    // pin it (matches the installed SDK platform) instead of flutter's default.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
