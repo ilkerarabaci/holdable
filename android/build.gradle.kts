@@ -21,11 +21,13 @@ subprojects {
 
 // Bump every module's Java compilation to 17 so it matches the Kotlin target.
 // Plugins like receive_sharing_intent compile Kotlin at 17 but default Java to
-// 11, failing with "Inconsistent JVM Target Compatibility". Touching only the
-// JavaCompile tasks avoids needing the Kotlin Gradle plugin types on the root
-// buildscript classpath.
-subprojects {
-    afterEvaluate {
+// 11, failing with "Inconsistent JVM Target Compatibility". Registered via
+// projectsEvaluated (after every module + AGP has configured) so this wins;
+// touching only JavaCompile avoids needing Kotlin plugin types on the root
+// classpath. (afterEvaluate can't be used here — the evaluationDependsOn block
+// above already evaluates projects.)
+gradle.projectsEvaluated {
+    allprojects {
         tasks.withType<JavaCompile>().configureEach {
             sourceCompatibility = JavaVersion.VERSION_17.toString()
             targetCompatibility = JavaVersion.VERSION_17.toString()
