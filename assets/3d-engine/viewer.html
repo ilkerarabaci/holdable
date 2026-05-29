@@ -108,7 +108,10 @@ function frameObject(obj) {
   const maxDim = Math.max(size.x, size.y, size.z) || 1;
   const dist = maxDim / (2 * Math.tan((Math.PI * camera.fov) / 360));
   fitDist = dist * 1.6;
-  camera.position.set(0, 0, fitDist);
+  // Default to an iso angle so even boxy/flat models read as 3D (a dead-front
+  // view of a cube is a flat square; the thumbnail captured here would look
+  // blank/2D). Preset 'Front' is still available from the View tab.
+  camera.position.set(fitDist * 0.62, fitDist * 0.52, fitDist * 0.62);
   camera.near = maxDim / 100;
   camera.far = maxDim * 100;
   camera.updateProjectionMatrix();
