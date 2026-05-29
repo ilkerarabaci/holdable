@@ -9,7 +9,9 @@ import 'package:holdable/features/library/data/app_database.dart';
 import 'package:holdable/features/library/data/library_controller.dart';
 import 'package:holdable/features/library/domain/library_model.dart';
 import 'package:holdable/features/library/presentation/model_card.dart';
+import 'package:holdable/features/import/data/import_service.dart';
 import 'package:holdable/features/onboarding/data/onboarding_controller.dart';
+import 'package:holdable/shared/crash/crash_reporter.dart';
 import 'package:holdable/shared/utils/format.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -63,7 +65,7 @@ Future<void> _pumpApp(
         if (library != null)
           libraryControllerProvider.overrideWith(() => _SeededLibrary(library)),
       ],
-      child: const HoldableApp(),
+      child: const HoldableApp(bootstrapSharing: false),
     ),
   );
   await tester.pump();
@@ -205,5 +207,24 @@ void main() {
     expect(bytesToHuman(512), '512 B');
     expect(bytesToHuman(1536), '1.5 KB');
     expect(bytesToHuman(52428800), '50.0 MB');
+  });
+
+  test('share intent keeps only .obj/.stl paths', () {
+    final kept = ImportService.supportedPaths([
+      '/in/cube.obj',
+      '/in/bracket.STL',
+      '/in/notes.pdf',
+      '/in/scene.blend',
+      '/in/photo.png',
+    ]);
+    expect(kept, ['/in/cube.obj', '/in/bracket.STL']);
+  });
+
+  test('NoopCrashReporter records without throwing', () {
+    const reporter = NoopCrashReporter();
+    expect(
+      () => reporter.recordError(StateError('boom'), StackTrace.current),
+      returnsNormally,
+    );
   });
 }

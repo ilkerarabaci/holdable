@@ -43,6 +43,7 @@ dependencies:
   path_provider: ^2.1.5
   drift: ^2.33.0
   drift_flutter: ^0.3.0
+  receive_sharing_intent: ^1.8.1
 dev_dependencies:
   flutter_test:
     sdk: flutter
