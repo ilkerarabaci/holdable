@@ -9,6 +9,7 @@ import '../../../app/theme_controller.dart';
 import '../../import/data/import_service.dart';
 import '../../import/presentation/import_sheet.dart';
 import '../data/library_controller.dart';
+import '../domain/library_model.dart';
 import 'model_card.dart';
 
 /// Runs the file-picker import and shows feedback. Shared by the FAB and the
@@ -114,15 +115,16 @@ class _ModelGrid extends ConsumerWidget {
           model: m,
           // Liquid-glass blur only while the set is small (perf guard).
           blur: models.length <= 6,
-          onTap: () {}, // viewer in W2
-          onLongPress: () => _showActions(context, ref, m.id, m.name),
+          onTap: () => context.push(Routes.viewer, extra: m),
+          onLongPress: () => _showActions(context, ref, m),
         );
       },
     );
   }
 
-  void _showActions(
-      BuildContext context, WidgetRef ref, String id, String name) {
+  void _showActions(BuildContext context, WidgetRef ref, LibraryModel model) {
+    final id = model.id;
+    final name = model.name;
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Theme.of(context).colorScheme.surface,
@@ -133,7 +135,10 @@ class _ModelGrid extends ConsumerWidget {
             ListTile(
               leading: const Icon(LucideIcons.eye),
               title: const Text('Open'),
-              onTap: () => Navigator.pop(context), // viewer in W2
+              onTap: () {
+                Navigator.pop(context);
+                context.push(Routes.viewer, extra: model);
+              },
             ),
             ListTile(
               leading: const Icon(LucideIcons.pencil),
