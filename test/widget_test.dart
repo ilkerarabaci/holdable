@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:drift/native.dart';
 import 'package:holdable/app/app.dart';
 import 'package:holdable/app/theme_controller.dart';
+import 'package:holdable/features/library/data/app_database.dart';
 import 'package:holdable/features/library/data/library_controller.dart';
 import 'package:holdable/features/library/domain/library_model.dart';
 import 'package:holdable/features/library/presentation/model_card.dart';
@@ -11,13 +13,13 @@ import 'package:holdable/features/onboarding/data/onboarding_controller.dart';
 import 'package:holdable/shared/utils/format.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-LibraryModel _sample(String id, String name) => LibraryModel(
+LibraryModel _sample(String id, String name, {DateTime? at}) => LibraryModel(
       id: id,
       name: name,
       format: ModelFormat.stl,
       sizeBytes: 52428800,
       filePath: '/tmp/$id.stl',
-      importedAt: DateTime(2026, 1, 1),
+      importedAt: at ?? DateTime(2026, 1, 1),
     );
 
 /// Seeds the library with fixed models for widget tests.
@@ -28,11 +30,21 @@ class _SeededLibrary extends LibraryController {
   List<LibraryModel> build() => _seed;
 }
 
+/// A fresh in-memory Drift database for a test (no on-device file).
+AppDatabase _memDb(Ref ref) {
+  final db = AppDatabase(NativeDatabase.memory());
+  ref.onDispose(db.close);
+  return db;
+}
+
 Future<ProviderContainer> _container(Map<String, Object> seed) async {
   SharedPreferences.setMockInitialValues(seed);
   final prefs = await SharedPreferences.getInstance();
   return ProviderContainer(
-    overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+    overrides: [
+      sharedPreferencesProvider.overrideWithValue(prefs),
+      databaseProvider.overrideWith(_memDb),
+    ],
   );
 }
 
@@ -47,6 +59,7 @@ Future<void> _pumpApp(
     ProviderScope(
       overrides: [
         sharedPreferencesProvider.overrideWithValue(prefs),
+        databaseProvider.overrideWith(_memDb),
         if (library != null)
           libraryControllerProvider.overrideWith(() => _SeededLibrary(library)),
       ],
@@ -148,17 +161,44 @@ void main() {
     expect(find.textContaining('.STL'), findsWidgets);
   });
 
-  test('LibraryController add/remove/rename', () async {
+  testWidgets('long-press -> Rename dialog updates the card', (tester) async {
+    await _pumpApp(
+      tester,
+      {'onboarding_shown': true},
+      library: [_sample('a', 'Bracket')],
+    );
+    await tester.longPress(find.byType(ModelCard));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Bracket v2');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(find.text('Bracket v2'), findsOneWidget);
+    expect(find.text('Bracket'), findsNothing);
+  });
+
+  test('LibraryController add/rename/remove persists to Drift', () async {
     final c = await _container({});
     addTearDown(c.dispose);
     final n = c.read(libraryControllerProvider.notifier);
-    n.add(_sample('a', 'Bracket'));
-    n.add(_sample('b', 'Vase'));
+    await n.add(_sample('a', 'Bracket', at: DateTime(2026, 1, 1)));
+    await n.add(_sample('b', 'Vase', at: DateTime(2026, 1, 2)));
     expect(c.read(libraryControllerProvider).length, 2);
-    n.rename('a', 'Bracket v2');
+    await n.rename('a', 'Bracket v2');
     expect(c.read(libraryControllerProvider).first.name, 'Vase'); // newest first
-    n.remove('b');
+    await n.remove('b');
     expect(c.read(libraryControllerProvider).single.name, 'Bracket v2');
+
+    // Persistence: a fresh controller on the SAME db hydrates the survivor.
+    final rows = await c.read(databaseProvider).allModels();
+    expect(rows.single.name, 'Bracket v2');
+  });
+
+  test('ModelFormat.fromExtension accepts obj/stl, rejects blend', () {
+    expect(ModelFormat.fromExtension('obj'), ModelFormat.obj);
+    expect(ModelFormat.fromExtension('.STL'), ModelFormat.stl);
+    expect(ModelFormat.fromExtension('blend'), isNull);
   });
 
   test('bytesToHuman formats sizes', () {

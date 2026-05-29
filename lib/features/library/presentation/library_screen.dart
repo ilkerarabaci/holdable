@@ -6,9 +6,31 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../../app/router.dart';
 import '../../../app/theme/prism_colors.dart';
 import '../../../app/theme_controller.dart';
+import '../../import/data/import_service.dart';
 import '../../import/presentation/import_sheet.dart';
 import '../data/library_controller.dart';
 import 'model_card.dart';
+
+/// Runs the file-picker import and shows feedback. Shared by the FAB and the
+/// import sheet's "Files" row.
+Future<void> _runImport(BuildContext context, WidgetRef ref) async {
+  final result = await ref.read(importServiceProvider).pickAndImport();
+  if (!context.mounted) return;
+  final messenger = ScaffoldMessenger.of(context);
+  switch (result.status) {
+    case ImportStatus.added:
+      messenger.showSnackBar(
+        SnackBar(content: Text('Added "${result.model!.name}"')),
+      );
+    case ImportStatus.cancelled:
+      break;
+    case ImportStatus.unsupported:
+    case ImportStatus.error:
+      messenger.showSnackBar(
+        SnackBar(content: Text(result.message ?? 'Import failed')),
+      );
+  }
+}
 
 /// Library: empty state when the wallet is empty, otherwise a grid of
 /// liquid-glass model cards. FAB opens the import sheet.
@@ -35,7 +57,10 @@ class LibraryScreen extends ConsumerWidget {
         ),
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => ImportSheet.show(context),
+        onPressed: () => ImportSheet.show(
+          context,
+          onPickFiles: () => _runImport(context, ref),
+        ),
         child: const Icon(LucideIcons.plus),
       ),
     );
@@ -113,7 +138,10 @@ class _ModelGrid extends ConsumerWidget {
             ListTile(
               leading: const Icon(LucideIcons.pencil),
               title: const Text('Rename'),
-              onTap: () => Navigator.pop(context), // D4
+              onTap: () {
+                Navigator.pop(context);
+                _showRenameDialog(context, ref, id, name);
+              },
             ),
             ListTile(
               leading: const Icon(LucideIcons.share2),
@@ -132,6 +160,42 @@ class _ModelGrid extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  void _showRenameDialog(
+      BuildContext context, WidgetRef ref, String id, String current) {
+    final controller = TextEditingController(text: current);
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename model'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Name'),
+          onSubmitted: (_) => _submitRename(ctx, ref, id, controller.text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => _submitRename(ctx, ref, id, controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _submitRename(
+      BuildContext ctx, WidgetRef ref, String id, String value) {
+    final name = value.trim();
+    if (name.isNotEmpty) {
+      ref.read(libraryControllerProvider.notifier).rename(id, name);
+    }
+    Navigator.pop(ctx);
   }
 }
 
