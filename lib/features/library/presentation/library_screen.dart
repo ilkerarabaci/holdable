@@ -6,16 +6,18 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../../app/router.dart';
 import '../../../app/theme/prism_colors.dart';
 import '../../../app/theme_controller.dart';
+import '../../import/presentation/import_sheet.dart';
+import '../data/library_controller.dart';
+import 'model_card.dart';
 
-/// D1 library shell: header (brand + theme toggle + profile), empty state.
-/// Grid/list, liquid-glass cards and the import sheet arrive in D3.
+/// Library: empty state when the wallet is empty, otherwise a grid of
+/// liquid-glass model cards. FAB opens the import sheet.
 class LibraryScreen extends ConsumerWidget {
   const LibraryScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final c = context.prism;
-    final t = Theme.of(context).textTheme;
+    final models = ref.watch(libraryControllerProvider);
     final mode = ref.watch(themeControllerProvider);
     final isDark = mode == ThemeMode.dark;
 
@@ -23,56 +25,121 @@ class LibraryScreen extends ConsumerWidget {
       body: SafeArea(
         child: Column(
           children: [
-            _Header(isDark: isDark),
+            _Header(isDark: isDark, count: models.length),
             Expanded(
-              child: Center(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 40),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(LucideIcons.box, size: 40, color: c.textMuted),
-                      const SizedBox(height: 16),
-                      Text(
-                        'Your shelf is empty.',
-                        style: t.titleLarge,
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Drop a .obj or .stl to begin.',
-                        style: t.bodyMedium?.copyWith(color: c.textMuted),
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+              child: models.isEmpty
+                  ? const _EmptyState()
+                  : _ModelGrid(),
             ),
           ],
         ),
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          // D3: open import bottom sheet (Files / URL / Sample).
-          showModalBottomSheet<void>(
-            context: context,
-            builder: (_) => const SizedBox(
-              height: 160,
-              child: Center(child: Text('Import sheet — coming in D3')),
-            ),
-          );
-        },
+        onPressed: () => ImportSheet.show(context),
         child: const Icon(LucideIcons.plus),
       ),
     );
   }
 }
 
+class _EmptyState extends StatelessWidget {
+  const _EmptyState();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.prism;
+    final t = Theme.of(context).textTheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 40),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(LucideIcons.box, size: 40, color: c.textMuted),
+            const SizedBox(height: 16),
+            Text('Your shelf is empty.',
+                style: t.titleLarge, textAlign: TextAlign.center),
+            const SizedBox(height: 8),
+            Text('Drop a .obj or .stl to begin.',
+                style: t.bodyMedium?.copyWith(color: c.textMuted),
+                textAlign: TextAlign.center),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ModelGrid extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final models = ref.watch(libraryControllerProvider);
+    return GridView.builder(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 96),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        mainAxisSpacing: 14,
+        crossAxisSpacing: 14,
+        childAspectRatio: 0.82,
+      ),
+      itemCount: models.length,
+      itemBuilder: (context, i) {
+        final m = models[i];
+        return ModelCard(
+          model: m,
+          // Liquid-glass blur only while the set is small (perf guard).
+          blur: models.length <= 6,
+          onTap: () {}, // viewer in W2
+          onLongPress: () => _showActions(context, ref, m.id, m.name),
+        );
+      },
+    );
+  }
+
+  void _showActions(
+      BuildContext context, WidgetRef ref, String id, String name) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(LucideIcons.eye),
+              title: const Text('Open'),
+              onTap: () => Navigator.pop(context), // viewer in W2
+            ),
+            ListTile(
+              leading: const Icon(LucideIcons.pencil),
+              title: const Text('Rename'),
+              onTap: () => Navigator.pop(context), // D4
+            ),
+            ListTile(
+              leading: const Icon(LucideIcons.share2),
+              title: const Text('Share'),
+              onTap: () => Navigator.pop(context), // D5
+            ),
+            ListTile(
+              leading: const Icon(LucideIcons.trash2),
+              title: const Text('Delete'),
+              onTap: () {
+                ref.read(libraryControllerProvider.notifier).remove(id);
+                Navigator.pop(context);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _Header extends ConsumerWidget {
-  const _Header({required this.isDark});
+  const _Header({required this.isDark, required this.count});
 
   final bool isDark;
+  final int count;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -83,6 +150,13 @@ class _Header extends ConsumerWidget {
       child: Row(
         children: [
           Text('Library', style: t.displayMedium),
+          const SizedBox(width: 10),
+          if (count > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text('$count',
+                  style: t.labelSmall?.copyWith(color: c.textMuted)),
+            ),
           const Spacer(),
           IconButton(
             tooltip: isDark ? 'Light mode' : 'Dark mode',
