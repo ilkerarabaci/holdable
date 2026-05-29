@@ -34,7 +34,7 @@ class ImportService {
   Future<ImportResult> pickAndImport() async {
     final FilePickerResult? result;
     try {
-      result = await FilePicker.pickFiles(
+      result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['obj', 'stl'],
       );
