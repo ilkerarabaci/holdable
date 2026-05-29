@@ -73,6 +73,21 @@ const material = new THREE.MeshStandardMaterial({
   color: 0xd8d8de, metalness: 0.1, roughness: 0.55, flatShading: false,
 });
 
+// Theme-aware canvas: keep the viewer consistent with the app theme instead
+// of always-dark. In light mode the model is darkened so it contrasts.
+window.setTheme = function (mode) {
+  if (mode === 'light') {
+    scene.background = new THREE.Color(0xEDEBE6);
+    material.color.setHex(0x8A9099);
+    document.body.style.background = '#EDEBE6';
+  } else {
+    scene.background = new THREE.Color(0x0E0E10);
+    material.color.setHex(0xD8D8DE);
+    document.body.style.background = '#0E0E10';
+  }
+  material.needsUpdate = true;
+};
+
 // Render modes (product-spec: Solid / Wireframe / X-ray).
 window.setRenderMode = function (mode) {
   if (mode === 'wireframe') {
