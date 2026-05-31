@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Perf-test STL fixtures (generated via tools/gen_stl.py, adb-pushed not bundled)
+perf_*.stl

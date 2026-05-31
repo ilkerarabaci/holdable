@@ -5,6 +5,12 @@ on:
     branches: [main, "feature/**"]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Also build a profile APK (for perf measurement)"
+        type: boolean
+        default: true
 
 env:
   FLUTTER_VERSION: "3.44.0"
@@ -45,4 +51,29 @@ jobs:
         with:
           name: holdable-debug-apk
           path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+
+  build-profile:
+    name: Build profile APK
+    needs: analyze-test
+    # Only on manual dispatch — profile build is for perf measurement, not every push.
+    if: github.event_name == 'workflow_dispatch' && inputs.profile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build apk --profile
+      - uses: actions/upload-artifact@v4
+        with:
+          name: holdable-profile-apk
+          path: build/app/outputs/flutter-apk/app-profile.apk
           if-no-files-found: error
