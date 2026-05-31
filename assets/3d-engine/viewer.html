@@ -27,6 +27,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const statusEl = document.getElementById('status');
 function post(msg) { try { ModelChannel.postMessage(msg); } catch (e) {} }
@@ -164,15 +165,25 @@ window.loadModel = function (format, b64) {
   try {
     setStatus('parsing ' + format + '…');
     const bin = atob(b64);
+    b64 = null; // free the base64 string (~1.33x file size) before geometry alloc
     const len = bin.length;
     const bytes = new Uint8Array(len);
     for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
 
-    if (current) { scene.remove(current); current = null; }
+    // Free the previous model's CPU+GPU buffers (matters on prev/next nav).
+    if (current) {
+      current.traverse((o) => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
+      scene.remove(current);
+      current = null;
+    }
     const t0 = performance.now();
     let obj;
     if (format === 'stl') {
-      const geom = new STLLoader().parse(bytes.buffer);
+      let geom = new STLLoader().parse(bytes.buffer);
+      // STL is non-indexed (positions = 3x triangles). Weld shared vertices
+      // into an indexed geometry — ~3x less geometry memory on closed meshes —
+      // then compute smooth normals over the smaller vertex set.
+      geom = mergeVertices(geom);
       geom.computeVertexNormals();
       obj = new THREE.Mesh(geom, material);
     } else {
