@@ -48,6 +48,11 @@ dependencies:
   receive_sharing_intent: ^1.8.1
   webview_flutter: ^4.13.1
   flutter_scene: ^0.9.2-0
+  # flutter_gpu ships with the Flutter SDK (used directly for gpu.IndexType in
+  # the mesh-upload adapter). flutter_scene depends on it transitively, but we
+  # reference it directly so it must be declared.
+  flutter_gpu:
+    sdk: flutter
 dev_dependencies:
   flutter_test:
     sdk: flutter
