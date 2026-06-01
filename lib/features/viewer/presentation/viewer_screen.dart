@@ -10,6 +10,7 @@ import '../../../app/theme/prism_colors.dart';
 import '../../../app/theme/prism_gradient.dart';
 import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
+import '../data/gpu_support.dart';
 import 'scene_view.dart';
 
 /// Interactive 3D viewer. Renders the model natively with flutter_scene
@@ -33,10 +34,16 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   _Tab _tab = _Tab.view;
   ModelSceneStatus _status = const ModelSceneStatus(loading: true);
 
+  /// null = still checking, false = device GPU can't run the native viewer.
+  bool? _gpuSupported;
+
   @override
   void initState() {
     super.initState();
     _model = widget.model;
+    GpuSupport.isSupported().then((ok) {
+      if (mounted) setState(() => _gpuSupported = ok);
+    });
   }
 
   void _onStatus(ModelSceneStatus status) {
@@ -95,7 +102,11 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
           const SizedBox(width: 4),
         ],
       ),
-      body: Stack(
+      body: _gpuSupported == null
+          ? const Center(child: CircularProgressIndicator())
+          : _gpuSupported == false
+              ? const _UnsupportedGpu()
+              : Stack(
         children: [
           Positioned.fill(
             child: ModelSceneView(
@@ -146,6 +157,40 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       bottomNavigationBar: _Toolbar(
         current: _tab,
         onSelect: (t) => setState(() => _tab = t),
+      ),
+    );
+  }
+}
+
+/// Shown when the device's GPU can't run the native renderer (no Vulkan on
+/// Android; flutter_scene crashes on the GLES backend).
+class _UnsupportedGpu extends StatelessWidget {
+  const _UnsupportedGpu();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.prism;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(LucideIcons.triangleAlert, size: 40, color: c.textMuted),
+            const SizedBox(height: 16),
+            Text(
+              "This device's GPU isn't supported yet.",
+              style: TextStyle(color: c.textPrimary, fontSize: 16),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'The 3D viewer needs a Vulkan-capable GPU.',
+              style: TextStyle(color: c.textMuted),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
       ),
     );
   }
