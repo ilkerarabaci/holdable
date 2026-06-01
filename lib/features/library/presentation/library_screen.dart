@@ -6,6 +6,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../../app/router.dart';
 import '../../../app/theme/prism_colors.dart';
 import '../../../app/theme_controller.dart';
+import '../../../shared/utils/format.dart';
 import '../../import/data/import_service.dart';
 import '../../import/data/sample_models.dart';
 import '../../import/presentation/import_sheet.dart';
@@ -52,7 +53,9 @@ Future<void> _pickSample(BuildContext context, WidgetRef ref) async {
 /// Runs the file-picker import and shows feedback. Shared by the FAB and the
 /// import sheet's "Files" row.
 Future<void> _runImport(BuildContext context, WidgetRef ref) async {
-  final result = await ref.read(importServiceProvider).pickAndImport();
+  final result = await ref.read(importServiceProvider).pickAndImport(
+        confirmOversize: (size) => _confirmOversize(context, size),
+      );
   if (!context.mounted) return;
   final messenger = ScaffoldMessenger.of(context);
   switch (result.status) {
@@ -68,6 +71,40 @@ Future<void> _runImport(BuildContext context, WidgetRef ref) async {
         SnackBar(content: Text(result.message ?? 'Import failed')),
       );
   }
+}
+
+/// Prism-voice confirmation for a file past the soft size cap
+/// ([kMaxImportBytes]). Returns true if the user chooses to load it anyway.
+Future<bool> _confirmOversize(BuildContext context, int sizeBytes) async {
+  final c = context.prism;
+  final t = Theme.of(context).textTheme;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: c.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(color: c.borderHairline),
+      ),
+      title: Text('Heavy model', style: t.titleMedium),
+      content: Text(
+        '${bytesToHuman(sizeBytes)} is past the comfortable range. '
+        'It may load slowly and run hot.',
+        style: t.bodyMedium?.copyWith(color: c.textMuted),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          child: Text('Cancel', style: TextStyle(color: c.textMuted)),
+        ),
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          child: Text('Load anyway', style: TextStyle(color: c.textPrimary)),
+        ),
+      ],
+    ),
+  );
+  return ok ?? false;
 }
 
 /// Library: empty state when the wallet is empty, otherwise a grid of
