@@ -53,6 +53,9 @@ dependencies:
   # reference it directly so it must be declared.
   flutter_gpu:
     sdk: flutter
+  # Vector/matrix math for the native camera + transforms (also a transitive
+  # flutter_scene dep; declared directly since we use Vector3/Matrix4 here).
+  vector_math: ^2.1.4
 dev_dependencies:
   flutter_test:
     sdk: flutter

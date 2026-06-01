@@ -1,20 +1,21 @@
-import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../../app/theme/prism_colors.dart';
 import '../../../app/theme/prism_gradient.dart';
 import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
+import 'scene_view.dart';
 
-/// Interactive 3D viewer. Renders the model in a WebView running a bundled
-/// three.js scene (OBJ/STL loaders, OrbitControls). Model bytes are passed to
-/// JS as chunked base64 over a channel — no CORS, no local server.
+/// Interactive 3D viewer. Renders the model natively with flutter_scene
+/// (Flutter GPU / Impeller) — see ADR-001. The render surface, orbit controls,
+/// render modes, preset cameras and thumbnail capture live in [ModelSceneView];
+/// this screen owns the surrounding chrome (toolbar, panels, prev/next nav).
 class ViewerScreen extends ConsumerStatefulWidget {
   const ViewerScreen({super.key, required this.model});
 
@@ -27,108 +28,41 @@ class ViewerScreen extends ConsumerStatefulWidget {
 enum _Tab { view, render, info }
 
 class _ViewerScreenState extends ConsumerState<ViewerScreen> {
-  late final WebViewController _controller;
+  final ModelSceneController _scene = ModelSceneController();
   late LibraryModel _model;
-  bool _ready = false;
   _Tab _tab = _Tab.view;
-  bool _loading = true;
-  String? _error;
-  int? _tris;
-  int? _verts;
-  int? _ms;
+  ModelSceneStatus _status = const ModelSceneStatus(loading: true);
 
   @override
   void initState() {
     super.initState();
     _model = widget.model;
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..addJavaScriptChannel('ModelChannel', onMessageReceived: _onMessage)
-      ..loadFlutterAsset('assets/3d-engine/viewer.html');
   }
 
-  Future<void> _onMessage(JavaScriptMessage message) async {
-    final raw = message.message;
-    if (raw == 'ready') {
-      _ready = true;
-      await _applyTheme();
-      await _sendModel();
-      return;
-    }
-    try {
-      final data = jsonDecode(raw) as Map<String, dynamic>;
-      if (!mounted) return;
-      if (data['type'] == 'loaded') {
-        setState(() {
-          _loading = false;
-          _tris = (data['tris'] as num?)?.toInt();
-          _verts = (data['verts'] as num?)?.toInt();
-          _ms = (data['ms'] as num?)?.toInt();
-        });
-      } else if (data['type'] == 'error') {
-        setState(() {
-          _loading = false;
-          _error = data['message'] as String? ?? 'Failed to render';
-        });
-      } else if (data['type'] == 'thumb') {
-        await _saveThumbnail(data['data'] as String);
-      }
-    } catch (_) {/* ignore non-JSON */}
+  void _onStatus(ModelSceneStatus status) {
+    if (mounted) setState(() => _status = status);
   }
 
-  Future<void> _applyTheme() async {
-    final mode =
-        Theme.of(context).brightness == Brightness.light ? 'light' : 'dark';
-    await _controller.runJavaScript("window.setTheme('$mode')");
-  }
-
-  Future<void> _sendModel() async {
-    try {
-      final bytes = await File(_model.filePath).readAsBytes();
-      final b64 = base64Encode(bytes);
-      // Send in 256KB chunks — a single arg this large trips Android's binder
-      // limit (TransactionTooLargeException) on big models. base64 is quote/
-      // backslash-free, so it embeds safely in a single-quoted JS literal.
-      const chunkSize = 256 * 1024;
-      for (var i = 0; i < b64.length; i += chunkSize) {
-        final end = (i + chunkSize < b64.length) ? i + chunkSize : b64.length;
-        await _controller
-            .runJavaScript("window.appendChunk('${b64.substring(i, end)}')");
-      }
-      await _controller.runJavaScript("window.loadChunked('${_model.format.name}')");
-    } catch (e) {
-      if (mounted) setState(() => _error = '$e');
-    }
-  }
-
-  /// Persists the base64 PNG thumbnail captured by the viewer.
-  Future<void> _saveThumbnail(String b64) async {
+  /// Persists the PNG thumbnail captured by the scene view.
+  Future<void> _saveThumbnail(Uint8List bytes) async {
     try {
       final docs = await getApplicationDocumentsDirectory();
       final thumbsDir = Directory('${docs.path}/thumbs');
       if (!thumbsDir.existsSync()) thumbsDir.createSync(recursive: true);
       final path = '${thumbsDir.path}/${_model.id}.png';
-      await File(path).writeAsBytes(base64Decode(b64));
+      await File(path).writeAsBytes(bytes);
       await ref
           .read(libraryControllerProvider.notifier)
           .setThumbnail(_model.id, path);
     } catch (_) {/* best-effort */}
   }
 
-  void _setMode(String mode) =>
-      _controller.runJavaScript("window.setRenderMode('$mode')");
-  void _setView(String which) =>
-      _controller.runJavaScript("window.setView('$which')");
-
-  /// Loads a different model into the existing WebView (prev/next nav).
+  /// Loads a different model into the existing scene (prev/next nav).
   void _goTo(LibraryModel m) {
     setState(() {
       _model = m;
-      _loading = true;
-      _error = null;
-      _tris = _verts = _ms = null;
+      _status = const ModelSceneStatus(loading: true);
     });
-    if (_ready) _sendModel();
   }
 
   @override
@@ -163,10 +97,19 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       ),
       body: Stack(
         children: [
-          Positioned.fill(child: WebViewWidget(controller: _controller)),
-          if (_loading && _error == null)
+          Positioned.fill(
+            child: ModelSceneView(
+              controller: _scene,
+              filePath: _model.filePath,
+              format: _model.format.name,
+              background: c.bg,
+              onStatus: _onStatus,
+              onThumbnail: _saveThumbnail,
+            ),
+          ),
+          if (_status.loading && _status.error == null)
             const Center(child: CircularProgressIndicator()),
-          if (_error != null)
+          if (_status.error != null)
             Center(
               child: Padding(
                 padding: const EdgeInsets.all(32),
@@ -176,13 +119,28 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
               ),
             ),
           if (_tab == _Tab.view)
-            Positioned(left: 0, right: 0, bottom: 0, child: _PresetPanel(onView: _setView)),
+            Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _PresetPanel(onView: _scene.setView)),
           if (_tab == _Tab.render)
-            Positioned(left: 0, right: 0, bottom: 0, child: _RenderPanel(onMode: _setMode)),
+            Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _RenderPanel(onMode: _scene.setRenderMode)),
           if (_tab == _Tab.info)
-            Positioned(left: 0, right: 0, bottom: 0, child: _InfoPanel(
-              model: _model, tris: _tris, verts: _verts, ms: _ms,
-            )),
+            Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _InfoPanel(
+                  model: _model,
+                  tris: _status.tris,
+                  verts: _status.verts,
+                  ms: _status.parseMs,
+                )),
         ],
       ),
       bottomNavigationBar: _Toolbar(
