@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:developer' as developer;
+import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
@@ -30,7 +32,24 @@ class SharingService {
   Future<void> _ingest(Iterable<String> paths) async {
     final importer = ref.read(importServiceProvider);
     for (final path in ImportService.supportedPaths(paths)) {
+      // Share-intent has no UI to confirm an oversize import (the file-picker
+      // path prompts; see kMaxImportBytes), so skip files past the cap rather
+      // than silently loading something that runs hot.
+      final size = _sizeOf(path);
+      if (size != null && size > kMaxImportBytes) {
+        developer.log('Skipped oversize shared file ($size bytes): $path',
+            name: 'SharingService');
+        continue;
+      }
       await importer.importPath(path);
+    }
+  }
+
+  int? _sizeOf(String path) {
+    try {
+      return File(path).lengthSync();
+    } catch (_) {
+      return null;
     }
   }
 
