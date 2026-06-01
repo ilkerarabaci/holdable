@@ -43,20 +43,40 @@ The code change is real and merged. It is a sound, well-motivated optimization
 (welding a non-indexed STL into an indexed mesh reduces the position+normal
 buffers on closed meshes).
 
-> ## ⚠️ After-fix on-device numbers — NOT YET VERIFIED
-> An earlier revision of this file (commit `23f3104`) reported specific post-fix
-> PSS / parse / vertex figures. **Those were not validly measured** and have been
-> retracted: the OCR path that "read" them was never installed (`pytesseract`
-> absent), and at least one `dumpsys` reading was taken against a build whose
-> `install` had silently failed (debug-vs-profile signature mismatch), i.e. the
-> old binary. They were false precision, so they are removed rather than kept.
->
-> The weld's real on-device effect still needs a clean measurement:
-> `adb uninstall` → install the weld profile APK → import each fixture → confirm
-> the model is fully loaded (Info panel populated, or poll `dumpsys` until native
-> heap plateaus) → record PSS. Tracked in the backlog.
+## After fix — VERIFIED on device (50 MB worst case)
 
-## Open levers for 25/50 MB (once weld is measured)
+Measured on a clean install of the weld profile APK (APK verified to contain
+`mergeVertices` in `viewer.html`), model fully loaded (render complete, Info
+populated). The welded vertex count (523,454 vs the baseline's 3,140,712)
+confirms the weld is actually running.
+
+| Metric        | Baseline (50 MB) | Weld (50 MB) | Budget |
+|---------------|------------------|--------------|--------|
+| Welded verts  | 3,140,712        | **523,454** (~6× ↓) | — |
+| Native heap   | 185 MB           | **51 MB**    | — |
+| TOTAL PSS     | 303 MB           | **247 MB** ✗ | <200 MB |
+| SWAP PSS      | ~29 MB           | **50 MB**    | — |
+| PARSE         | 350 ms           | **3594 ms** ✗ | <3 s |
+
+> An earlier revision of this file (commit `23f3104`) reported *different*
+> post-fix figures (e.g. 251 MB PSS, 1383 ms parse) — those were never validly
+> measured (OCR path never installed; one reading hit a build whose install had
+> silently failed) and were retracted in `436529f`. The table above is the real,
+> verified measurement.
+
+### Two findings
+1. **Weld cut geometry memory hard** — native heap 185 → 51 MB. But TOTAL PSS
+   only dropped 303 → 247 MB because **swap rose to 50 MB** (the system is still
+   under memory pressure). 50 MB still misses the 200 MB budget.
+2. **Weld regressed parse past budget** — 350 ms → 3594 ms. `mergeVertices` hashes
+   all 3.14 M incoming vertices to weld them; that pass is expensive. **Parse now
+   exceeds the < 3 s budget** (3.59 s) where the baseline had a ~9× margin.
+
+This is a genuine trade-off: the weld trades parse time for memory. Worth
+weighing `flatShading` (skips the merge, keeps memory savings small but parse
+fast) or making the weld conditional on triangle count.
+
+## Open levers for 25/50 MB
 - WebView (Chromium) + Flutter baseline is a hard floor (~180 MB even small), so
   geometry savings alone likely can't bring 50 MB under 200 MB.
 - **Soft model-size cap + warning** at import — bounds the worst case (not yet implemented; designed below).
