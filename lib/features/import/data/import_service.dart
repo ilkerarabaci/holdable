@@ -32,7 +32,9 @@ class ImportService {
           if (ModelFormat.fromExtension(_ext(p)) != null) p,
       ];
 
-  Future<ImportResult> pickAndImport() async {
+  Future<ImportResult> pickAndImport({
+    Future<bool> Function(int sizeBytes)? confirmOversize,
+  }) async {
     final FilePickerResult? result;
     try {
       result = await FilePicker.platform.pickFiles(
@@ -48,6 +50,12 @@ class ImportService {
     final picked = result.files.single;
     if (picked.path == null) {
       return const ImportResult(ImportStatus.unsupported);
+    }
+    // Soft cap: very large models load slowly and can push memory past budget
+    // (see docs/perf-w3-baseline.md). Let the UI confirm before importing.
+    if (picked.size > kMaxImportBytes && confirmOversize != null) {
+      final proceed = await confirmOversize(picked.size);
+      if (!proceed) return const ImportResult(ImportStatus.cancelled);
     }
     return importPath(picked.path!, displayName: picked.name, size: picked.size);
   }
@@ -131,5 +139,11 @@ class ImportService {
     return dot > 0 ? name.substring(0, dot) : name;
   }
 }
+
+/// Soft cap for imports. Files larger than this prompt a confirmation before
+/// loading — alpha scope is <=50 MB; 60 leaves headroom. A 50 MB STL already
+/// sits near the 200 MB PSS budget (docs/perf-w3-baseline.md), so this guards
+/// against accidentally importing something that loads slowly / runs hot.
+const kMaxImportBytes = 60 * 1024 * 1024;
 
 final importServiceProvider = Provider<ImportService>(ImportService.new);
