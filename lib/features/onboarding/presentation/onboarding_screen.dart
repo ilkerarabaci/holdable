@@ -55,6 +55,15 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     );
   }
 
+  /// Steps back one pane. No-op on the first pane.
+  void _back() {
+    if (_page == 0) return;
+    _controller.previousPage(
+      duration: const Duration(milliseconds: 320),
+      curve: Curves.easeInOut,
+    );
+  }
+
   @override
   void dispose() {
     _controller.dispose();
@@ -64,7 +73,14 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   @override
   Widget build(BuildContext context) {
     final c = context.prism;
-    return Scaffold(
+    return PopScope(
+      // On panes after the first, a back gesture rewinds one pane instead of
+      // leaving onboarding.
+      canPop: _page == 0,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _back();
+      },
+      child: Scaffold(
       body: SafeArea(
         child: Column(
           children: [
@@ -95,6 +111,14 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
+        // Back arrow appears after the first pane to step back through panes.
+        automaticallyImplyLeading: false,
+        leading: _page == 0
+            ? null
+            : IconButton(
+                icon: Icon(Icons.arrow_back, color: c.textMuted),
+                onPressed: _back,
+              ),
         actions: [
           if (!_isLast)
             TextButton(
@@ -107,6 +131,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         ],
       ),
       extendBodyBehindAppBar: true,
+      ),
     );
   }
 }
