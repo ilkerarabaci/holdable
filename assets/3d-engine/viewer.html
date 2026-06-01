@@ -29,6 +29,12 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
+// Above this triangle count, skip the vertex weld: mergeVertices() hashing
+// dominates parse time on huge meshes (a 1.05M-tri STL parsed in 3.6s welded
+// vs 0.35s unwelded) without bringing PSS under budget anyway. ~25 MB STL
+// (≈0.5M tris) still welds comfortably. See docs/perf-w3-baseline.md.
+const WELD_MAX_TRIS = 600000;
+
 const statusEl = document.getElementById('status');
 function post(msg) { try { ModelChannel.postMessage(msg); } catch (e) {} }
 function setStatus(s) { statusEl.textContent = s; }
@@ -180,10 +186,19 @@ window.loadModel = function (format, b64) {
     let obj;
     if (format === 'stl') {
       let geom = new STLLoader().parse(bytes.buffer);
-      // STL is non-indexed (positions = 3x triangles). Weld shared vertices
-      // into an indexed geometry — ~3x less geometry memory on closed meshes —
-      // then compute smooth normals over the smaller vertex set.
-      geom = mergeVertices(geom);
+      // STL is non-indexed (positions = 3x triangles). Welding shared vertices
+      // into an indexed geometry roughly halves geometry memory on closed
+      // meshes — but mergeVertices() hashes every incoming vertex, so on huge
+      // meshes the weld dominates parse time (measured: a 1.05M-tri / 50 MB STL
+      // went 350ms -> 3594ms, past the <3s budget, while still missing the PSS
+      // budget). So weld only up to a triangle threshold; above it, skip the
+      // weld and keep the fast non-indexed path. See docs/perf-w3-baseline.md.
+      const triCount = geom.attributes.position
+        ? geom.attributes.position.count / 3
+        : 0;
+      if (triCount <= WELD_MAX_TRIS) {
+        geom = mergeVertices(geom);
+      }
       geom.computeVertexNormals();
       obj = new THREE.Mesh(geom, material);
     } else {
