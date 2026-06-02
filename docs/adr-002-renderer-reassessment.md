@@ -1,6 +1,6 @@
 # ADR-002 — Renderer reassessment after the native (flutter_scene) experiment
 
-**Status:** PROPOSED — awaiting Architect decision
+**Status:** ACCEPTED — Option C (Thermion/Filament) as the newest version line
 **Date:** 2026-06-02
 **Supersedes consideration of:** ADR-001 (native renderer via flutter_scene)
 **Context:** v0.2-native built + device-tested on a real Vulkan phone (Galaxy S26 Ultra)
@@ -103,6 +103,19 @@ renderer that actually solves the memory budget. Treat **B** as a fallback to
 revisit only if/when Impeller ships `reduceGpuMemoryUse()` (#178264). Keep
 `v0.2-native` and all renderer-agnostic work intact.
 
-## Decision
+## Decision (Architect, 2026-06-02)
 
-_Pending._
+**Adopt Thermion (Filament) as the newest version line (v0.3), keeping the prior
+lines for rollback.** Versioning, mirroring ADR-001:
+- **v0.1 WebView** — `v0.1.0-alpha-webview` + `release/0.1-webview` (kept).
+- **v0.2 flutter_scene** — frozen at tag `v0.2.0-alpha-flutterscene`, branch
+  `v0.2-native` retained (kept, recoverable).
+- **v0.3 Thermion** — new branch `v0.3-thermion` (pubspec `0.3.0+1`); build the
+  Filament-based viewer behind the same `ViewerScreen` contract, reusing the
+  renderer-agnostic OBJ/STL parser, gate, in-app PSS readout, and chrome. Merge
+  to `main` only at feature parity AND a verified memory budget on a real device.
+
+If Thermion doesn't pan out (memory, complexity, OBJ/STL→glTF), we can roll back
+to v0.2 (flutter_scene) or v0.1 (WebView). The WebView v0.1 remains the
+fallback for distributing an alpha if needed.
+
