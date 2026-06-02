@@ -40,9 +40,9 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   /// null = still checking, false = device GPU can't run the native viewer.
   bool? _gpuSupported;
 
-  /// Live process PSS (KB) shown in the Info panel on non-release builds, so
+  /// Live PSS breakdown (KB) shown in the Info panel on non-release builds, so
   /// memory can be read on-device without `adb dumpsys meminfo`.
-  int? _pssKb;
+  Map<String, int>? _mem;
   Timer? _pssTimer;
 
   @override
@@ -54,8 +54,8 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     });
     if (!kReleaseMode) {
       _pssTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-        final v = await NativeStats.pssKb();
-        if (mounted && v != null) setState(() => _pssKb = v);
+        final v = await NativeStats.memStats();
+        if (mounted && v != null) setState(() => _mem = v);
       });
     }
   }
@@ -171,7 +171,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                   tris: _status.tris,
                   verts: _status.verts,
                   ms: _status.parseMs,
-                  pssKb: _pssKb,
+                  mem: _mem,
                 )),
         ],
       ),
@@ -380,24 +380,35 @@ class _InfoPanel extends StatelessWidget {
     this.tris,
     this.verts,
     this.ms,
-    this.pssKb,
+    this.mem,
   });
   final LibraryModel model;
   final int? tris;
   final int? verts;
   final int? ms;
-  final int? pssKb;
+  final Map<String, int>? mem;
 
   @override
   Widget build(BuildContext context) {
     final c = context.prism;
     String n(int? v) => v == null ? '—' : v.toString();
+    String mb(String k) {
+      final kb = mem?[k];
+      return kb == null ? '—' : '${(kb / 1024).round()} MB';
+    }
+
     final rows = <List<String>>[
       ['FORMAT', model.format.label],
       ['VERTICES', n(verts)],
       ['TRIANGLES', n(tris)],
       ['PARSE', ms == null ? '—' : '${ms}ms'],
-      if (pssKb != null) ['MEMORY', '${(pssKb! / 1024).round()} MB'],
+      if (mem != null) ...[
+        ['MEMORY (PSS)', mb('total')],
+        ['• GRAPHICS', mb('graphics')],
+        ['• NATIVE', mb('native')],
+        ['• DART', mb('java')],
+        ['• CODE', mb('code')],
+      ],
     ];
     return _Panel(
       label: 'INFO',

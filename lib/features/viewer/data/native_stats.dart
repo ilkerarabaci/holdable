@@ -19,4 +19,18 @@ class NativeStats {
       return null;
     }
   }
+
+  /// Full PSS breakdown in KB (keys: total, java, native, code, stack,
+  /// graphics, other, system) — same buckets as `dumpsys meminfo` App Summary.
+  /// Tells us where memory goes (GPU vs native heap vs dart). Android only.
+  static Future<Map<String, int>?> memStats() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final raw = await _channel.invokeMapMethod<String, dynamic>('getMemStats');
+      if (raw == null) return null;
+      return raw.map((k, v) => MapEntry(k, (v as num).toInt()));
+    } catch (_) {
+      return null;
+    }
+  }
 }
