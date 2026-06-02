@@ -29,6 +29,26 @@ class MainActivity : FlutterActivity() {
                         Debug.getMemoryInfo(mi)
                         result.success(mi.totalPss)
                     }
+                    // Full PSS breakdown (KB) — same buckets as dumpsys meminfo
+                    // "App Summary". Tells us WHERE memory goes (graphics vs
+                    // native heap vs dart vs code).
+                    "getMemStats" -> {
+                        val mi = Debug.MemoryInfo()
+                        Debug.getMemoryInfo(mi)
+                        fun stat(k: String) = mi.getMemoryStat(k)?.toIntOrNull() ?: 0
+                        result.success(
+                            hashMapOf(
+                                "total" to mi.totalPss,
+                                "java" to stat("summary.java-heap"),
+                                "native" to stat("summary.native-heap"),
+                                "code" to stat("summary.code"),
+                                "stack" to stat("summary.stack"),
+                                "graphics" to stat("summary.graphics"),
+                                "other" to stat("summary.private-other"),
+                                "system" to stat("summary.system")
+                            )
+                        )
+                    }
                     else -> result.notImplemented()
                 }
             }
