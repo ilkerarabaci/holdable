@@ -117,7 +117,11 @@ class _ModelSceneViewState extends State<ModelSceneView>
   Future<void> _init() async {
     await Scene.initializeStaticResources();
     if (!mounted) return;
-    _scene = Scene();
+    _scene = Scene()
+      // MSAA 4x render targets are huge on high-res phones (~4-5x the memory of
+      // a single-sample target, ×frames-in-flight) — the dominant memory cost.
+      // Off keeps the GPU footprint sane; we can revisit edge-AA later.
+      ..antiAliasingMode = AntiAliasingMode.none;
     _ready = true;
     await _load();
   }
@@ -236,12 +240,17 @@ class _ModelSceneViewState extends State<ModelSceneView>
     );
   }
 
+  /// Last on-screen viewport size, reused for thumbnail capture so the GPU
+  /// Surface isn't forced to reallocate render targets at a different size.
+  ui.Size _lastSize = const ui.Size(512, 512);
+
   /// Renders the current scene into [canvas]. Called by [_ScenePainter].
   void renderInto(ui.Canvas canvas, ui.Size size) {
     // Theme background shows through the scene's transparent clear color.
     canvas.drawColor(widget.background, ui.BlendMode.src);
     final scene = _scene;
     if (!_ready || scene == null || size.isEmpty) return;
+    _lastSize = size;
     scene.render(_camera(), canvas, viewport: ui.Offset.zero & size);
   }
 
@@ -249,24 +258,39 @@ class _ModelSceneViewState extends State<ModelSceneView>
     final scene = _scene;
     final onThumb = widget.onThumbnail;
     if (scene == null || onThumb == null) return;
-    const dim = 256.0;
+    // Render at the live viewport size (no Surface size change → no render-target
+    // reallocation), then downscale the resulting image to a 256px thumbnail.
+    final w = _lastSize.width.round().clamp(64, 2048);
+    final h = _lastSize.height.round().clamp(64, 2048);
+    const dim = 256;
     try {
       final recorder = ui.PictureRecorder();
-      final canvas = ui.Canvas(
-        recorder,
-        const ui.Rect.fromLTWH(0, 0, dim, dim),
-      );
+      final rect = ui.Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble());
+      final canvas = ui.Canvas(recorder, rect);
       canvas.drawColor(widget.background, ui.BlendMode.src);
-      scene.render(
-        _camera(),
-        canvas,
-        viewport: const ui.Rect.fromLTWH(0, 0, dim, dim),
-      );
+      scene.render(_camera(), canvas, viewport: rect);
       final picture = recorder.endRecording();
-      final image = await picture.toImage(dim.toInt(), dim.toInt());
-      final data = await image.toByteData(format: ui.ImageByteFormat.png);
+      final full = await picture.toImage(w, h);
       picture.dispose();
-      image.dispose();
+
+      // Downscale (centered square crop) to the thumbnail size on the CPU path.
+      final side = math.min(w, h).toDouble();
+      final src = ui.Rect.fromLTWH((w - side) / 2, (h - side) / 2, side, side);
+      final rec2 = ui.PictureRecorder();
+      final c2 = ui.Canvas(rec2);
+      c2.drawImageRect(
+        full,
+        src,
+        const ui.Rect.fromLTWH(0, 0, 256, 256),
+        ui.Paint()..filterQuality = ui.FilterQuality.medium,
+      );
+      final pic2 = rec2.endRecording();
+      final small = await pic2.toImage(dim, dim);
+      pic2.dispose();
+      full.dispose();
+
+      final data = await small.toByteData(format: ui.ImageByteFormat.png);
+      small.dispose();
       if (data == null || !mounted) return;
       onThumb(data.buffer.asUint8List());
     } catch (_) {
