@@ -88,12 +88,29 @@ class _ModelSceneViewState extends State<ModelSceneView>
 
   String _mode = 'solid';
 
+  /// On-demand rendering: instead of drawing 60fps forever (which keeps
+  /// Impeller's Vulkan allocator hot and inflates graphics PSS), we only render
+  /// in short bursts after something changes — load, orbit, mode/preset. When
+  /// idle the ticker stops and the GPU pool can be reclaimed.
+  int _renderFramesLeft = 0;
+
   @override
   void initState() {
     super.initState();
     widget.controller._attach(this);
-    _ticker = createTicker((_) => _frame.value++)..start();
+    _ticker = createTicker(_onTick); // started on demand, not continuously
     _init();
+  }
+
+  void _onTick(Duration _) {
+    _frame.value++;
+    if (--_renderFramesLeft <= 0) _ticker.stop();
+  }
+
+  /// Render for the next [frames] frames (~16ms each), then idle.
+  void _requestRender([int frames = 30]) {
+    if (frames > _renderFramesLeft) _renderFramesLeft = frames;
+    if (!_ticker.isActive) _ticker.start();
   }
 
   @override
@@ -142,6 +159,7 @@ class _ModelSceneViewState extends State<ModelSceneView>
         ..add(_node!);
 
       _frameModel(parsed.mesh.bounds);
+      _requestRender(90); // ~1.5s to upload, settle, and capture the thumbnail
 
       widget.onStatus(
         ModelSceneStatus(
@@ -185,6 +203,7 @@ class _ModelSceneViewState extends State<ModelSceneView>
     if (node?.mesh != null) {
       node!.mesh!.primitives.first.material = _materialFor(mode);
     }
+    _requestRender();
   }
 
   void _setPreset(String preset) {
@@ -204,6 +223,7 @@ class _ModelSceneViewState extends State<ModelSceneView>
         _elevation = 0.5;
     }
     _distance = _defaultDistance;
+    _requestRender();
   }
 
   Material _materialFor(String mode) {
@@ -250,6 +270,7 @@ class _ModelSceneViewState extends State<ModelSceneView>
     canvas.drawColor(widget.background, ui.BlendMode.src);
     final scene = _scene;
     if (!_ready || scene == null || size.isEmpty) return;
+    if (size != _lastSize) _requestRender(2); // size changed (e.g. rotation)
     _lastSize = size;
     scene.render(_camera(), canvas, viewport: ui.Offset.zero & size);
   }
@@ -310,6 +331,7 @@ class _ModelSceneViewState extends State<ModelSceneView>
           _distance = (_zoomStartDistance / details.scale)
               .clamp(_radius * 0.4, _radius * 25);
         }
+        _requestRender(20); // keep drawing through the gesture
       },
       child: CustomPaint(
         painter: _ScenePainter(this, _frame),
@@ -331,8 +353,11 @@ class _ScenePainter extends CustomPainter {
   @override
   void paint(ui.Canvas canvas, ui.Size size) => _view.renderInto(canvas, size);
 
+  // Repaint ONLY when the frame notifier fires (on-demand bursts) — not on every
+  // parent rebuild. Otherwise unrelated setState (e.g. the PSS poll) would force
+  // a GPU render and defeat on-demand rendering.
   @override
-  bool shouldRepaint(covariant _ScenePainter old) => true;
+  bool shouldRepaint(covariant _ScenePainter old) => false;
 }
 
 // -----------------------------------------------------------------------------
