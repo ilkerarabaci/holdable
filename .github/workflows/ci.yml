@@ -36,9 +36,7 @@ jobs:
 
   build-android:
     name: Build debug APK
-    # Temporarily decoupled from analyze-test to verify the Thermion ANDROID
-    # build independently (the host build that `flutter test` triggers is a
-    # separate concern). Re-add `needs: analyze-test` once tests are green.
+    needs: analyze-test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
