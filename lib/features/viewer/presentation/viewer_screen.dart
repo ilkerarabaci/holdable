@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -11,6 +13,7 @@ import '../../../app/theme/prism_gradient.dart';
 import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
 import '../data/gpu_support.dart';
+import '../data/native_stats.dart';
 import 'scene_view.dart';
 
 /// Interactive 3D viewer. Renders the model natively with flutter_scene
@@ -37,6 +40,11 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   /// null = still checking, false = device GPU can't run the native viewer.
   bool? _gpuSupported;
 
+  /// Live process PSS (KB) shown in the Info panel on non-release builds, so
+  /// memory can be read on-device without `adb dumpsys meminfo`.
+  int? _pssKb;
+  Timer? _pssTimer;
+
   @override
   void initState() {
     super.initState();
@@ -44,6 +52,18 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     GpuSupport.isSupported().then((ok) {
       if (mounted) setState(() => _gpuSupported = ok);
     });
+    if (!kReleaseMode) {
+      _pssTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+        final v = await NativeStats.pssKb();
+        if (mounted && v != null) setState(() => _pssKb = v);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _pssTimer?.cancel();
+    super.dispose();
   }
 
   void _onStatus(ModelSceneStatus status) {
@@ -151,6 +171,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                   tris: _status.tris,
                   verts: _status.verts,
                   ms: _status.parseMs,
+                  pssKb: _pssKb,
                 )),
         ],
       ),
@@ -354,11 +375,18 @@ class _RenderPanel extends StatelessWidget {
 }
 
 class _InfoPanel extends StatelessWidget {
-  const _InfoPanel({required this.model, this.tris, this.verts, this.ms});
+  const _InfoPanel({
+    required this.model,
+    this.tris,
+    this.verts,
+    this.ms,
+    this.pssKb,
+  });
   final LibraryModel model;
   final int? tris;
   final int? verts;
   final int? ms;
+  final int? pssKb;
 
   @override
   Widget build(BuildContext context) {
@@ -369,6 +397,7 @@ class _InfoPanel extends StatelessWidget {
       ['VERTICES', n(verts)],
       ['TRIANGLES', n(tris)],
       ['PARSE', ms == null ? '—' : '${ms}ms'],
+      if (pssKb != null) ['MEMORY', '${(pssKb! / 1024).round()} MB'],
     ];
     return _Panel(
       label: 'INFO',
