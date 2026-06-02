@@ -272,7 +272,33 @@ class _ModelSceneViewState extends State<ModelSceneView>
     if (!_ready || scene == null || size.isEmpty) return;
     if (size != _lastSize) _requestRender(2); // size changed (e.g. rotation)
     _lastSize = size;
-    scene.render(_camera(), canvas, viewport: ui.Offset.zero & size);
+    _renderScene(scene, _camera(), canvas, ui.Offset.zero & size);
+  }
+
+  /// Reimplements [Scene.render] so we can **dispose the per-frame [ui.Image]**.
+  /// flutter_scene 0.9.2-0's `Scene.render` wraps the render-target texture in a
+  /// `ui.Image` every frame and never disposes it; Impeller keeps a GPU copy per
+  /// call, so graphics memory grows unbounded (GBs) as you load/orbit. Disposing
+  /// the image after recording the draw releases that GPU memory. (MSAA is off,
+  /// so we always read the single-sample color texture.)
+  void _renderScene(
+    Scene scene,
+    Camera camera,
+    ui.Canvas canvas,
+    ui.Rect drawArea,
+  ) {
+    if (drawArea.isEmpty) return;
+    final renderTarget = scene.surface.getNextRenderTarget(drawArea.size, false);
+    final env = scene.environment.environmentMap.isEmpty()
+        ? scene.environment
+            .withNewEnvironmentMap(Material.getDefaultEnvironmentMap())
+        : scene.environment;
+    final encoder = SceneEncoder(renderTarget, camera, drawArea.size, env);
+    scene.root.render(encoder, vm.Matrix4.identity());
+    encoder.finish();
+    final image = renderTarget.colorAttachments[0].texture.asImage();
+    canvas.drawImage(image, drawArea.topLeft, ui.Paint());
+    image.dispose();
   }
 
   Future<void> _captureThumbnail() async {
@@ -289,7 +315,7 @@ class _ModelSceneViewState extends State<ModelSceneView>
       final rect = ui.Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble());
       final canvas = ui.Canvas(recorder, rect);
       canvas.drawColor(widget.background, ui.BlendMode.src);
-      scene.render(_camera(), canvas, viewport: rect);
+      _renderScene(scene, _camera(), canvas, rect);
       final picture = recorder.endRecording();
       final full = await picture.toImage(w, h);
       picture.dispose();
