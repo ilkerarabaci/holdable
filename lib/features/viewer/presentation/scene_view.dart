@@ -3,9 +3,10 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
-// Thermion re-exports thermion_dart (Geometry, FilamentApp, DirectLight,
-// Camera, the material/culling enums), vector_math_64 (Vector3, Matrix4) and
-// dart:typed_data. Hide the names that collide with flutter/widgets.
+// Thermion re-exports thermion_dart (ThermionFlutterPlugin, ThermionViewer,
+// Geometry, FilamentApp, DirectLight, Camera, the material/culling/index enums),
+// vector_math_64 (Vector3, Matrix4) and dart:typed_data. Hide the names that
+// collide with flutter/widgets.
 import 'package:thermion_flutter/thermion_flutter.dart' hide Texture, View, Material;
 
 import '../data/model_parser.dart';
@@ -28,7 +29,7 @@ class ModelSceneStatus {
 }
 
 /// Imperative handle for the host screen to drive the viewer (render mode,
-/// preset camera). Implemented by the active renderer.
+/// preset camera, model color). Implemented by the active renderer.
 class ModelSceneController {
   _ModelSceneViewState? _state;
 
@@ -39,6 +40,9 @@ class ModelSceneController {
 
   void setRenderMode(String mode) => _state?._setRenderMode(mode);
   void setView(String preset) => _state?._setPreset(preset);
+
+  /// Sets the model's base color (the surface tint the light shades).
+  void setColor(Color color) => _state?._setColor(color);
 }
 
 /// 3D viewer surface — **v0.3, Thermion (Google Filament)**.
@@ -50,12 +54,14 @@ class ModelSceneController {
 /// [ModelParser], de-interleaved into Filament's separate attribute buffers, and
 /// uploaded via [ThermionViewer.createGeometry] (no glTF round-trip needed).
 ///
-/// Keeps the same widget contract as the prior renderer lines so the host
-/// [ViewerScreen] is unchanged.
+/// Orbit is driven by our own [GestureDetector] math (azimuth / elevation /
+/// radius around the model center) rather than Thermion's built-in fixed-orbit
+/// handler — that handler felt stiff and couldn't zoom in past the framing
+/// distance. This restores the free, responsive feel of the v0.2 viewer.
 ///
-/// This first Thermion render does solid shading + orbit + preset cameras.
-/// Render modes (wireframe / x-ray) and thumbnail capture land in a follow-up
-/// once the on-device PSS budget is confirmed (the point of the v0.3 pivot).
+/// Keeps the same widget contract as the prior renderer lines so the host
+/// [ViewerScreen] is unchanged. Solid shading + orbit + presets + color; render
+/// modes (wireframe / x-ray) and thumbnail capture follow.
 class ModelSceneView extends StatefulWidget {
   const ModelSceneView({
     super.key,
@@ -79,27 +85,39 @@ class ModelSceneView extends StatefulWidget {
 }
 
 class _ModelSceneViewState extends State<ModelSceneView> {
-  /// Just-parsed model awaiting GPU upload. Set when a parse completes, nulled
-  /// once uploaded (to drop the CPU-side copy). Never read by [build] for the
-  /// rebuild decision — [_epoch] drives that — so nulling it can't race a
-  /// reload.
+  ThermionViewer? _viewer;
+  Camera? _camera;
+  ThermionAsset? _asset;
+  MaterialInstance? _material;
+
+  /// Just-parsed model awaiting GPU upload (set on parse, nulled after upload).
   _PreparedModel? _pending;
 
-  /// Bumped on every successful parse. Used as the [ViewerWidget] key so a new
-  /// model gets a fresh viewer, and a stale one doesn't (nulling [_pending]
-  /// after upload keeps the same epoch → no spurious recreation).
-  int _epoch = 0;
+  bool _viewerReady = false;
+  bool _hasModel = false; // a geometry is on screen
 
-  /// Framing distance for the current model, retained after [_pending] is freed
-  /// (used by preset cameras and the orbit minimum distance).
-  double _camDistance = 5;
+  // --- Orbit state: spherical camera around the (origin-centered) model. ---
+  double _azimuth = _isoAzimuth;
+  double _elevation = _isoElevation;
+  double _radius = 5;
+  double _minRadius = 0.5;
+  double _maxRadius = 50;
+  double _startRadius = 5; // captured on gesture start for pinch-zoom
 
-  ThermionViewer? _viewer;
+  // Coalesce camera writes: lookAt is async FFI, so we never let updates queue
+  // unbounded — apply the latest pose, re-apply only if it changed meanwhile.
+  bool _applyingCamera = false;
+  bool _cameraDirty = false;
+
+  static const double _isoAzimuth = math.pi / 4;
+  static const double _isoElevation = 0.6; // ~34° above the horizon
+  static const double _elevationLimit = math.pi / 2 - 0.05;
 
   @override
   void initState() {
     super.initState();
     widget.controller._attach(this);
+    _initViewer();
     _load();
   }
 
@@ -112,7 +130,47 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   @override
   void dispose() {
     widget.controller._detach(this);
+    final viewer = _viewer;
+    _viewer = null;
+    viewer?.dispose(); // fire-and-forget; unloads scene, leaves engine intact
     super.dispose();
+  }
+
+  /// Creates the Filament viewer once and applies the scene-wide setup.
+  Future<void> _initViewer() async {
+    try {
+      final viewer = await ThermionFlutterPlugin.createViewer();
+      await viewer.setPostProcessing(true);
+      await viewer.setAntiAliasing(false, true, false); // FXAA only
+      await viewer.setBackgroundColor(
+        widget.background.r,
+        widget.background.g,
+        widget.background.b,
+        1.0,
+      );
+      // A single directional "sun" so the PBR material is shaded (no IBL/skybox
+      // is loaded, so an unlit scene would render flat/black).
+      await viewer.addDirectLight(
+        DirectLight.sun(
+          direction: Vector3(0.3, -0.8, 0.5)..normalize(),
+          intensity: 80000,
+          castShadows: false,
+        ),
+      );
+      final camera = await viewer.getActiveCamera();
+      if (!mounted) {
+        await viewer.dispose();
+        return;
+      }
+      _viewer = viewer;
+      _camera = camera;
+      _viewerReady = true;
+      if (_pending != null) {
+        await _upload();
+      }
+    } catch (e) {
+      if (mounted) widget.onStatus(ModelSceneStatus(loading: false, error: '$e'));
+    }
   }
 
   Future<void> _load() async {
@@ -123,35 +181,27 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         _ParseRequest(widget.filePath, widget.format),
       );
       if (!mounted) return;
-      // Advancing the epoch swaps in a fresh ViewerWidget for the new model;
-      // geometry uploads in [_onViewerAvailable], stats are reported there.
-      setState(() {
-        _pending = prepared;
-        _camDistance = prepared.camDistance;
-        _epoch++;
-      });
+      _pending = prepared;
+      if (_viewerReady) await _upload();
     } catch (e) {
       if (!mounted) return;
       widget.onStatus(ModelSceneStatus(loading: false, error: '$e'));
     }
   }
 
-  /// Called once the Filament viewer for the current model is ready. Adds a
-  /// light, uploads the geometry, centers + frames it, and reports stats.
-  Future<void> _onViewerAvailable(ThermionViewer viewer) async {
+  /// Uploads the pending model to the GPU, framing the camera to it.
+  Future<void> _upload() async {
+    final viewer = _viewer;
     final p = _pending;
-    if (p == null) return;
-    _viewer = viewer;
+    if (viewer == null || p == null) return;
     try {
-      // A single directional "sun" so the PBR material is shaded (no IBL/skybox
-      // is loaded, so an unlit scene would render flat/black).
-      await viewer.addDirectLight(
-        DirectLight.sun(
-          direction: Vector3(0.3, -0.8, 0.5)..normalize(),
-          intensity: 80000,
-          castShadows: false,
-        ),
-      );
+      // Replace any previous model (prev/next navigation).
+      final old = _asset;
+      if (old != null) {
+        await viewer.destroyAsset(old);
+        _asset = null;
+        _material = null;
+      }
 
       final geometry = Geometry(
         p.positions,
@@ -162,7 +212,6 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       );
 
       final material = await FilamentApp.instance!.createUbershaderMaterialInstance();
-      // Neutral light surface so the directional light reveals the form.
       await material.setParameterFloat4('baseColorFactor', 0.82, 0.82, 0.86, 1.0);
       // OBJ/STL winding is inconsistent — draw both faces.
       await material.setCullingMode(CullingMode.NONE);
@@ -172,6 +221,8 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         materialInstances: [material],
         releaseSourceData: true,
       );
+      _asset = asset;
+      _material = material;
 
       // Center the model at the origin so the orbit pivot + framing are stable.
       await FilamentApp.instance!.setTransform(
@@ -180,10 +231,19 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       );
       await viewer.addToScene(asset);
 
-      // Drop the CPU-side copy now it's on the GPU (keeps Dart heap lean; the
-      // whole v0.3 point is the GPU budget, but no reason to hold the source).
-      _pending = null;
+      // Frame the camera: iso view at a comfortable distance, with zoom limits.
+      final modelRadius = p.camDistance / 3.0; // camDistance == radius * 3
+      _radius = p.camDistance;
+      _startRadius = _radius;
+      _minRadius = math.max(modelRadius * 0.4, 0.05);
+      _maxRadius = p.camDistance * 5.0;
+      _azimuth = _isoAzimuth;
+      _elevation = _isoElevation;
+      await _applyCameraNow();
 
+      _pending = null; // drop the CPU-side copy now it's on the GPU
+      _hasModel = true;
+      if (mounted) setState(() {});
       widget.onStatus(
         ModelSceneStatus(
           loading: false,
@@ -197,50 +257,113 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     }
   }
 
+  // --- Camera control -------------------------------------------------------
+
+  /// Camera position on the sphere around the origin, from the orbit angles.
+  Vector3 _orbitPosition() {
+    final ce = math.cos(_elevation);
+    return Vector3(
+      _radius * ce * math.sin(_azimuth),
+      _radius * math.sin(_elevation),
+      _radius * ce * math.cos(_azimuth),
+    );
+  }
+
+  /// Applies the current orbit pose immediately (used for framing/presets).
+  Future<void> _applyCameraNow() async {
+    final cam = _camera;
+    if (cam == null) return;
+    await cam.lookAt(_orbitPosition(), focus: Vector3.zero(), up: Vector3(0, 1, 0));
+  }
+
+  /// Requests a camera update, coalescing rapid gesture deltas so async lookAt
+  /// calls never queue up.
+  void _requestCamera() {
+    _cameraDirty = true;
+    if (_applyingCamera) return;
+    _pumpCamera();
+  }
+
+  Future<void> _pumpCamera() async {
+    final cam = _camera;
+    if (cam == null) return;
+    _applyingCamera = true;
+    try {
+      while (_cameraDirty) {
+        _cameraDirty = false;
+        await cam.lookAt(_orbitPosition(),
+            focus: Vector3.zero(), up: Vector3(0, 1, 0));
+      }
+    } finally {
+      _applyingCamera = false;
+    }
+  }
+
+  void _onScaleStart(ScaleStartDetails d) {
+    _startRadius = _radius;
+  }
+
+  void _onScaleUpdate(ScaleUpdateDetails d) {
+    // Pinch → zoom (radius is relative to the gesture-start radius).
+    if (d.scale != 1.0) {
+      _radius = (_startRadius / d.scale).clamp(_minRadius, _maxRadius);
+    }
+    // Drag → rotate. focalPointDelta is the per-update movement in px.
+    final dp = d.focalPointDelta;
+    if (dp != Offset.zero) {
+      _azimuth -= dp.dx * _rotSpeed;
+      _elevation =
+          (_elevation + dp.dy * _rotSpeed).clamp(-_elevationLimit, _elevationLimit);
+    }
+    _requestCamera();
+  }
+
+  static const double _rotSpeed = 0.01; // rad per px — tuned for a free feel
+
+  /// Snaps the camera to a preset direction, keeping the current radius.
+  Future<void> _setPreset(String preset) async {
+    switch (preset) {
+      case 'front':
+        _azimuth = 0;
+        _elevation = 0;
+      case 'top':
+        _azimuth = 0;
+        _elevation = _elevationLimit;
+      case 'side':
+        _azimuth = math.pi / 2;
+        _elevation = 0;
+      case 'iso':
+      default:
+        _azimuth = _isoAzimuth;
+        _elevation = _isoElevation;
+    }
+    await _applyCameraNow();
+  }
+
+  /// Sets the model's base color (linear RGB; the light shades it).
+  Future<void> _setColor(Color color) async {
+    await _material?.setParameterFloat4(
+        'baseColorFactor', color.r, color.g, color.b, 1.0);
+  }
+
   // Render-mode swap. Solid is the only mode this build renders; wireframe and
-  // x-ray land in the follow-up once the on-device PSS budget is confirmed.
+  // x-ray land in the follow-up alongside thumbnail capture.
   void _setRenderMode(String mode) {
     // Intentionally a no-op for now (solid). Kept so the host's Render panel
     // chips don't break the controller contract.
   }
 
-  /// Snaps the camera to a preset direction, re-framing the centered model.
-  Future<void> _setPreset(String preset) async {
-    final viewer = _viewer;
-    if (viewer == null) return;
-    final distance = _camDistance;
-    Vector3 dir;
-    Vector3 up = Vector3(0, 1, 0);
-    switch (preset) {
-      case 'front':
-        dir = Vector3(0, 0, 1);
-      case 'top':
-        dir = Vector3(0, 1, 0);
-        up = Vector3(0, 0, -1);
-      case 'side':
-        dir = Vector3(1, 0, 0);
-      case 'iso':
-      default:
-        dir = Vector3(1, 0.7, 1)..normalize();
-    }
-    final camera = await viewer.getActiveCamera();
-    await camera.lookAt(dir * distance, focus: Vector3.zero(), up: up);
-  }
-
   @override
   Widget build(BuildContext context) {
-    if (_epoch == 0) {
-      // No model parsed yet — host shows the spinner over this background.
+    final viewer = _viewer;
+    if (!_hasModel || viewer == null) {
+      // Still creating the viewer / parsing — host shows the spinner over this.
       return ColoredBox(color: widget.background);
     }
-    return ViewerWidget(
-      key: ValueKey(_epoch),
-      manipulatorType: ManipulatorType.ORBIT,
-      initialCameraPosition: (Vector3(1, 0.7, 1)..normalize()) * _camDistance,
-      background: widget.background,
-      postProcessing: true,
-      onViewerAvailable: _onViewerAvailable,
-      initial: ColoredBox(color: widget.background),
+    return GestureDetector(
+      onScaleStart: _onScaleStart,
+      onScaleUpdate: _onScaleUpdate,
+      child: ThermionWidget(viewer: viewer),
     );
   }
 }

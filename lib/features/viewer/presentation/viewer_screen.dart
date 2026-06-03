@@ -161,7 +161,10 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                 left: 0,
                 right: 0,
                 bottom: 0,
-                child: _RenderPanel(onMode: _scene.setRenderMode)),
+                child: _RenderPanel(
+                  onMode: _scene.setRenderMode,
+                  onColor: _scene.setColor,
+                )),
           if (_tab == _Tab.info)
             Positioned(
                 left: 0,
@@ -360,17 +363,72 @@ class _PresetPanel extends StatelessWidget {
 }
 
 class _RenderPanel extends StatelessWidget {
-  const _RenderPanel({required this.onMode});
+  const _RenderPanel({required this.onMode, required this.onColor});
   final ValueChanged<String> onMode;
+  final ValueChanged<Color> onColor;
+
+  // Neutral default plus the three Prism accents (the only sanctioned colors).
+  static const Color _neutral = Color(0xFFD1D1DB);
+
   @override
   Widget build(BuildContext context) {
+    final c = context.prism;
     return _Panel(
       label: 'RENDER',
-      child: Wrap(spacing: 10, children: [
-        _Chip(label: 'Solid', onTap: () => onMode('solid')),
-        _Chip(label: 'Wireframe', onTap: () => onMode('wireframe')),
-        _Chip(label: 'X-ray', onTap: () => onMode('xray')),
-      ]),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(spacing: 10, children: [
+            _Chip(label: 'Solid', onTap: () => onMode('solid')),
+            _Chip(label: 'Wireframe', onTap: () => onMode('wireframe')),
+            _Chip(label: 'X-ray', onTap: () => onMode('xray')),
+          ]),
+          const SizedBox(height: 14),
+          Text('COLOR',
+              style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  letterSpacing: 1,
+                  color: c.textMuted)),
+          const SizedBox(height: 10),
+          Row(children: [
+            for (final color in const [
+              _neutral,
+              PrismGradient.pink,
+              PrismGradient.violet,
+              PrismGradient.cyan,
+            ])
+              _Swatch(color: color, onTap: () => onColor(color)),
+          ]),
+        ],
+      ),
+    );
+  }
+}
+
+class _Swatch extends StatelessWidget {
+  const _Swatch({required this.color, required this.onTap});
+  final Color color;
+  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) {
+    final c = context.prism;
+    return Padding(
+      padding: const EdgeInsets.only(right: 12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(999),
+        child: Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            border: Border.all(color: c.borderHairline),
+          ),
+        ),
+      ),
     );
   }
 }
