@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -102,6 +104,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
 
   bool _viewerReady = false;
   bool _hasModel = false;
+  bool _thumbCaptured = false; // one thumbnail per model load
 
   String _mode = 'solid';
   Color _baseColor = _kNeutral;
@@ -208,6 +211,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       if (!mounted) return;
       _model = prepared;
       _lineIndices = null; // invalidate the previous model's wireframe cache
+      _thumbCaptured = false;
       if (_viewerReady) await _applyMode(_mode, frame: true);
     } catch (e) {
       if (!mounted) return;
@@ -312,6 +316,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
           tris: p.triangleCount,
           parseMs: p.parseMs,
         ));
+        // Grab a library thumbnail once the (solid) model is framed.
+        if (mode == 'solid' && !_thumbCaptured && widget.onThumbnail != null) {
+          _scheduleThumbnail();
+        }
       }
     } catch (e) {
       if (mounted) widget.onStatus(ModelSceneStatus(loading: false, error: '$e'));
@@ -460,6 +468,65 @@ class _ModelSceneViewState extends State<ModelSceneView> {
 
   void _setRenderMode(String mode) {
     _applyMode(mode);
+  }
+
+  // --- Thumbnail capture ----------------------------------------------------
+
+  /// Captures a library thumbnail shortly after the model is framed (a small
+  /// delay lets the first frame settle on the GPU).
+  void _scheduleThumbnail() {
+    _thumbCaptured = true;
+    Future.delayed(const Duration(milliseconds: 400), () {
+      if (mounted) _captureThumbnail();
+    });
+  }
+
+  Future<void> _captureThumbnail() async {
+    final viewer = _viewer;
+    final cb = widget.onThumbnail;
+    if (viewer == null || cb == null) return;
+    try {
+      final view = viewer.view;
+      final caps = await FilamentApp.instance!.capture(
+        null,
+        view: view,
+        pixelDataFormat: PixelDataFormat.RGBA,
+        pixelDataType: PixelDataType.UBYTE,
+      );
+      if (caps.isEmpty) return;
+      final vp = await view.getViewport();
+      final png = await _encodeThumb(caps.first.$2, vp.width, vp.height);
+      if (png != null && mounted) cb(png);
+    } catch (_) {
+      _thumbCaptured = false; // let a later frame retry
+    }
+  }
+
+  /// Flips the bottom-up GL pixel buffer, downscales to 256px wide, PNG-encodes.
+  Future<Uint8List?> _encodeThumb(Uint8List rgba, int w, int h) async {
+    if (w <= 0 || h <= 0 || rgba.length < w * h * 4) return null;
+    final rowBytes = w * 4;
+    final flipped = Uint8List(rgba.length);
+    for (var y = 0; y < h; y++) {
+      flipped.setRange(
+          y * rowBytes, y * rowBytes + rowBytes, rgba, (h - 1 - y) * rowBytes);
+    }
+    const target = 256;
+    final th = math.max(1, (target * h / w).round());
+    final completer = Completer<ui.Image>();
+    ui.decodeImageFromPixels(
+      flipped,
+      w,
+      h,
+      ui.PixelFormat.rgba8888,
+      completer.complete,
+      targetWidth: target,
+      targetHeight: th,
+    );
+    final img = await completer.future;
+    final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
+    img.dispose();
+    return bytes?.buffer.asUint8List();
   }
 
   /// sRGB component → linear, so Filament's linear baseColorFactor shows the
