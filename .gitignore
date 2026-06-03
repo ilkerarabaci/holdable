@@ -33,6 +33,11 @@ migrate_working_dir/
 /build/
 /coverage/
 
+# Physical version-APK copies kept locally for on-device comparison/rollback.
+# The canonical artifacts live on GitHub Releases — don't bloat git history with
+# 100 MB binaries. The folder's README is tracked; the APKs are not.
+/dist/*.apk
+
 # Symbolication related
 app.*.symbols
 

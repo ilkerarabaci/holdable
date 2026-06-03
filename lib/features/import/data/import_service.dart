@@ -37,10 +37,13 @@ class ImportService {
   }) async {
     final FilePickerResult? result;
     try {
-      result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['obj', 'stl'],
-      );
+      // Use FileType.any, NOT FileType.custom with allowedExtensions: on
+      // Android the Storage Access Framework greys out files whose extension
+      // has no registered MIME type (.obj / .stl don't), so the user can't
+      // select their own model — they could only get one in via the share
+      // intent. FileType.any shows everything; we validate the extension
+      // ourselves in [importPath] (returns ImportStatus.unsupported otherwise).
+      result = await FilePicker.platform.pickFiles(type: FileType.any);
     } catch (e) {
       return ImportResult(ImportStatus.error, message: '$e');
     }
