@@ -105,6 +105,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   bool _viewerReady = false;
   bool _hasModel = false;
   bool _thumbCaptured = false; // one thumbnail per model load
+  // Off until live-view capture is replaced with a safe offscreen-RT path; it
+  // destabilized load on device (see _scheduleThumbnail call site).
+  static final bool _thumbnailEnabled = false;
 
   String _mode = 'solid';
   Color _baseColor = _kNeutral;
@@ -317,7 +320,14 @@ class _ModelSceneViewState extends State<ModelSceneView> {
           parseMs: p.parseMs,
         ));
         // Grab a library thumbnail once the (solid) model is framed.
-        if (mode == 'solid' && !_thumbCaptured && widget.onThumbnail != null) {
+        // DISABLED: capturing the live on-screen view at load time (heavy GPU
+        // readback + full-screen buffer copy + PNG decode while the render loop
+        // is active) destabilized the app on device. Revisit with an offscreen
+        // render target / on-demand capture so it can't stall the load path.
+        if (_thumbnailEnabled &&
+            mode == 'solid' &&
+            !_thumbCaptured &&
+            widget.onThumbnail != null) {
           _scheduleThumbnail();
         }
       }
