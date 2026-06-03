@@ -12,3 +12,11 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+
+# Exception: the committed *debug* keystore. It uses the standard public debug
+# credentials (storepass/keypass "android", alias androiddebugkey) — the same
+# well-known values as Flutter's auto-generated ~/.android/debug.keystore, so it
+# carries NO security value. Committing it only makes the debug signature stable
+# across CI builds, so sideloaded updates on test devices stop requiring an
+# uninstall + Play Protect re-approval. NEVER commit a real release keystore.
+!/app/holdable-debug.keystore
