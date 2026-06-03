@@ -27,6 +27,20 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        // Override the per-machine default debug key with a committed, stable
+        // debug keystore (standard public "android" credentials — no security
+        // value). This keeps the debug signature identical across CI builds, so
+        // sideloaded test-device updates install over the previous build instead
+        // of forcing an uninstall + Play Protect re-approval every time.
+        getByName("debug") {
+            storeFile = file("holdable-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.
