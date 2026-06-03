@@ -4,12 +4,15 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart';
+// Hide Flutter's View/Texture so Thermion's same-named types resolve (we use the
+// Thermion ones for the offscreen thumbnail render target; we don't use Flutter's
+// View/Texture widgets in this file).
+import 'package:flutter/widgets.dart' hide View, Texture;
 // Thermion re-exports thermion_dart (ThermionFlutterPlugin, ThermionViewer,
-// Geometry, FilamentApp, DirectLight, Camera, the material/culling/index enums),
-// vector_math_64 (Vector3, Matrix4) and dart:typed_data. Hide the names that
-// collide with flutter/widgets.
-import 'package:thermion_flutter/thermion_flutter.dart' hide Texture, View, Material;
+// Geometry, FilamentApp, DirectLight, Camera, View, RenderTarget, the
+// material/culling/index enums), vector_math_64 (Vector3, Matrix4) and
+// dart:typed_data. Hide only Material (collides with flutter/material, unused).
+import 'package:thermion_flutter/thermion_flutter.dart' hide Material;
 
 import '../data/model_parser.dart';
 
@@ -105,9 +108,14 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   bool _viewerReady = false;
   bool _hasModel = false;
   bool _thumbCaptured = false; // one thumbnail per model load
-  // Off until live-view capture is replaced with a safe offscreen-RT path; it
-  // destabilized load on device (see _scheduleThumbnail call site).
-  static final bool _thumbnailEnabled = false;
+  // Thumbnails are captured from a SEPARATE offscreen View + RenderTarget, never
+  // the live on-screen view — a live-view capture on the load path destabilized
+  // the app (alpha.4). The offscreen render is a one-shot and can't stall the
+  // interactive render loop.
+  static const bool _thumbnailEnabled = true;
+  View? _thumbView; // owns the offscreen render target natively
+  Camera? _thumbCamera;
+  static const int _thumbRtSize = 512; // square offscreen render-target size
 
   String _mode = 'solid';
   Color _baseColor = _kNeutral;
@@ -155,7 +163,12 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   void dispose() {
     widget.controller._detach(this);
     final viewer = _viewer;
+    final thumbView = _thumbView;
     _viewer = null;
+    _thumbView = null;
+    _thumbCamera = null;
+    // Best-effort: free the offscreen view before tearing down the viewer.
+    if (thumbView != null) FilamentApp.instance?.destroyView(thumbView);
     viewer?.dispose();
     super.dispose();
   }
@@ -486,7 +499,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   /// delay lets the first frame settle on the GPU).
   void _scheduleThumbnail() {
     _thumbCaptured = true;
-    Future.delayed(const Duration(milliseconds: 400), () {
+    // Wait well past load so the offscreen capture runs only when things are
+    // idle (it's offscreen anyway, but this keeps the load path clean).
+    Future.delayed(const Duration(milliseconds: 900), () {
       if (mounted) _captureThumbnail();
     });
   }
@@ -494,21 +509,49 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   Future<void> _captureThumbnail() async {
     final viewer = _viewer;
     final cb = widget.onThumbnail;
-    if (viewer == null || cb == null) return;
+    final app = FilamentApp.instance;
+    if (viewer == null || cb == null || app == null) return;
     try {
-      final view = viewer.view;
-      final caps = await FilamentApp.instance!.capture(
+      // Lazily build a dedicated offscreen view + square render target the first
+      // time. It shares the live scene (model + lights) but renders through its
+      // own camera into its own target, so capturing it never touches the
+      // on-screen swapchain or the interactive render loop.
+      var thumbView = _thumbView;
+      if (thumbView == null) {
+        final rt = await app.createRenderTarget(_thumbRtSize, _thumbRtSize);
+        thumbView = await app.createView();
+        await thumbView.setRenderTarget(rt);
+        await thumbView.setViewport(_thumbRtSize, _thumbRtSize);
+        final cam = await app.createCamera();
+        _thumbView = thumbView;
+        _thumbCamera = cam;
+      }
+      final cam = _thumbCamera!;
+      await thumbView.setScene(await viewer.view.getScene());
+      await thumbView.setCamera(cam);
+
+      // Frame the model from a fixed iso angle into the square target.
+      final r = _radius;
+      final ce = math.cos(_isoElevation);
+      final pos = _target +
+          Vector3(r * ce * math.sin(_isoAzimuth), r * math.sin(_isoElevation),
+              r * ce * math.cos(_isoAzimuth));
+      await cam.setProjectionFromVerticalFieldOfView(
+          45.0, 1.0, math.max(0.01, r * 0.02), r * 20.0);
+      await cam.lookAt(pos, focus: _target, up: Vector3(0, 1, 0));
+
+      final caps = await app.capture(
         null,
-        view: view,
+        view: thumbView,
+        captureRenderTarget: true,
         pixelDataFormat: PixelDataFormat.RGBA,
         pixelDataType: PixelDataType.UBYTE,
       );
       if (caps.isEmpty) return;
-      final vp = await view.getViewport();
-      final png = await _encodeThumb(caps.first.$2, vp.width, vp.height);
+      final png = await _encodeThumb(caps.first.$2, _thumbRtSize, _thumbRtSize);
       if (png != null && mounted) cb(png);
     } catch (_) {
-      _thumbCaptured = false; // let a later frame retry
+      _thumbCaptured = false; // let a later load retry
     }
   }
 
