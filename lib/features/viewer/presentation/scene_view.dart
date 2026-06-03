@@ -1,7 +1,12 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
+// Thermion re-exports thermion_dart (Geometry, FilamentApp, DirectLight,
+// Camera, the material/culling enums), vector_math_64 (Vector3, Matrix4) and
+// dart:typed_data. Hide the names that collide with flutter/widgets.
+import 'package:thermion_flutter/thermion_flutter.dart' hide Texture, View, Material;
 
 import '../data/model_parser.dart';
 
@@ -36,15 +41,21 @@ class ModelSceneController {
   void setView(String preset) => _state?._setPreset(preset);
 }
 
-/// 3D viewer surface.
+/// 3D viewer surface — **v0.3, Thermion (Google Filament)**.
 ///
-/// **v0.3 (Thermion/Filament) — work in progress.** The flutter_scene renderer
-/// (v0.2, tag `v0.2.0-alpha-flutterscene`) was frozen after device testing
-/// showed an Impeller GPU-memory floor we can't control (ADR-002). This is the
-/// scaffold for the Thermion-based viewer: it still parses the model off the UI
-/// isolate (the parser is renderer-agnostic) and reports stats, while the
-/// Filament render surface is wired up. Keeps the same widget contract so the
-/// host [ViewerScreen] is unchanged.
+/// The flutter_scene renderer (v0.2, tag `v0.2.0-alpha-flutterscene`) was frozen
+/// after device testing showed an Impeller GPU-memory floor we can't control
+/// (ADR-002). This renders the model with Filament, which manages its own GPU
+/// memory. The model is parsed off the UI isolate by the renderer-agnostic
+/// [ModelParser], de-interleaved into Filament's separate attribute buffers, and
+/// uploaded via [ThermionViewer.createGeometry] (no glTF round-trip needed).
+///
+/// Keeps the same widget contract as the prior renderer lines so the host
+/// [ViewerScreen] is unchanged.
+///
+/// This first Thermion render does solid shading + orbit + preset cameras.
+/// Render modes (wireframe / x-ray) and thumbnail capture land in a follow-up
+/// once the on-device PSS budget is confirmed (the point of the v0.3 pivot).
 class ModelSceneView extends StatefulWidget {
   const ModelSceneView({
     super.key,
@@ -68,6 +79,23 @@ class ModelSceneView extends StatefulWidget {
 }
 
 class _ModelSceneViewState extends State<ModelSceneView> {
+  /// Just-parsed model awaiting GPU upload. Set when a parse completes, nulled
+  /// once uploaded (to drop the CPU-side copy). Never read by [build] for the
+  /// rebuild decision — [_epoch] drives that — so nulling it can't race a
+  /// reload.
+  _PreparedModel? _pending;
+
+  /// Bumped on every successful parse. Used as the [ViewerWidget] key so a new
+  /// model gets a fresh viewer, and a stale one doesn't (nulling [_pending]
+  /// after upload keeps the same epoch → no spurious recreation).
+  int _epoch = 0;
+
+  /// Framing distance for the current model, retained after [_pending] is freed
+  /// (used by preset cameras and the orbit minimum distance).
+  double _camDistance = 5;
+
+  ThermionViewer? _viewer;
+
   @override
   void initState() {
     super.initState();
@@ -87,40 +115,138 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     super.dispose();
   }
 
-  // Render-mode / preset hooks land when the Filament view is wired in.
-  void _setRenderMode(String mode) {}
-  void _setPreset(String preset) {}
-
   Future<void> _load() async {
     widget.onStatus(const ModelSceneStatus(loading: true));
     try {
-      final parsed = await compute(
-        _parseModelEntry,
+      final prepared = await compute(
+        _prepareModelEntry,
         _ParseRequest(widget.filePath, widget.format),
       );
       if (!mounted) return;
-      widget.onStatus(
-        ModelSceneStatus(
-          loading: false,
-          verts: parsed.mesh.vertexCount,
-          tris: parsed.mesh.triangleCount,
-          parseMs: parsed.parseMs,
-        ),
-      );
+      // Advancing the epoch swaps in a fresh ViewerWidget for the new model;
+      // geometry uploads in [_onViewerAvailable], stats are reported there.
+      setState(() {
+        _pending = prepared;
+        _camDistance = prepared.camDistance;
+        _epoch++;
+      });
     } catch (e) {
       if (!mounted) return;
       widget.onStatus(ModelSceneStatus(loading: false, error: '$e'));
     }
   }
 
+  /// Called once the Filament viewer for the current model is ready. Adds a
+  /// light, uploads the geometry, centers + frames it, and reports stats.
+  Future<void> _onViewerAvailable(ThermionViewer viewer) async {
+    final p = _pending;
+    if (p == null) return;
+    _viewer = viewer;
+    try {
+      // A single directional "sun" so the PBR material is shaded (no IBL/skybox
+      // is loaded, so an unlit scene would render flat/black).
+      await viewer.addDirectLight(
+        DirectLight.sun(
+          direction: Vector3(0.3, -0.8, 0.5)..normalize(),
+          intensity: 80000,
+          castShadows: false,
+        ),
+      );
+
+      final geometry = Geometry(
+        p.positions,
+        p.indices,
+        normals: p.normals,
+        uvs: p.uvs,
+        indexType: p.indexType,
+      );
+
+      final material = await FilamentApp.instance!.createUbershaderMaterialInstance();
+      // Neutral light surface so the directional light reveals the form.
+      await material.setParameterFloat4('baseColorFactor', 0.82, 0.82, 0.86, 1.0);
+      // OBJ/STL winding is inconsistent — draw both faces.
+      await material.setCullingMode(CullingMode.NONE);
+
+      final asset = await viewer.createGeometry(
+        geometry,
+        materialInstances: [material],
+        releaseSourceData: true,
+      );
+
+      // Center the model at the origin so the orbit pivot + framing are stable.
+      await FilamentApp.instance!.setTransform(
+        asset.entity,
+        Matrix4.translation(Vector3(-p.centerX, -p.centerY, -p.centerZ)),
+      );
+      await viewer.addToScene(asset);
+
+      // Drop the CPU-side copy now it's on the GPU (keeps Dart heap lean; the
+      // whole v0.3 point is the GPU budget, but no reason to hold the source).
+      _pending = null;
+
+      widget.onStatus(
+        ModelSceneStatus(
+          loading: false,
+          verts: p.vertexCount,
+          tris: p.triangleCount,
+          parseMs: p.parseMs,
+        ),
+      );
+    } catch (e) {
+      if (mounted) widget.onStatus(ModelSceneStatus(loading: false, error: '$e'));
+    }
+  }
+
+  // Render-mode swap. Solid is the only mode this build renders; wireframe and
+  // x-ray land in the follow-up once the on-device PSS budget is confirmed.
+  void _setRenderMode(String mode) {
+    // Intentionally a no-op for now (solid). Kept so the host's Render panel
+    // chips don't break the controller contract.
+  }
+
+  /// Snaps the camera to a preset direction, re-framing the centered model.
+  Future<void> _setPreset(String preset) async {
+    final viewer = _viewer;
+    if (viewer == null) return;
+    final distance = _camDistance;
+    Vector3 dir;
+    Vector3 up = Vector3(0, 1, 0);
+    switch (preset) {
+      case 'front':
+        dir = Vector3(0, 0, 1);
+      case 'top':
+        dir = Vector3(0, 1, 0);
+        up = Vector3(0, 0, -1);
+      case 'side':
+        dir = Vector3(1, 0, 0);
+      case 'iso':
+      default:
+        dir = Vector3(1, 0.7, 1)..normalize();
+    }
+    final camera = await viewer.getActiveCamera();
+    await camera.lookAt(dir * distance, focus: Vector3.zero(), up: up);
+  }
+
   @override
   Widget build(BuildContext context) {
-    return ColoredBox(color: widget.background);
+    if (_epoch == 0) {
+      // No model parsed yet — host shows the spinner over this background.
+      return ColoredBox(color: widget.background);
+    }
+    return ViewerWidget(
+      key: ValueKey(_epoch),
+      manipulatorType: ManipulatorType.ORBIT,
+      initialCameraPosition: (Vector3(1, 0.7, 1)..normalize()) * _camDistance,
+      background: widget.background,
+      postProcessing: true,
+      onViewerAvailable: _onViewerAvailable,
+      initial: ColoredBox(color: widget.background),
+    );
   }
 }
 
 // -----------------------------------------------------------------------------
-// Off-isolate parsing (renderer-agnostic; reused across renderer lines)
+// Off-isolate parse + de-interleave (renderer-agnostic parser reused as-is)
 // -----------------------------------------------------------------------------
 
 class _ParseRequest {
@@ -129,18 +255,102 @@ class _ParseRequest {
   final String format;
 }
 
-/// Result of parsing on a background isolate.
-class ParsedModel {
-  ParsedModel(this.mesh, this.parseMs);
-  final MeshData mesh;
+/// Parsed model, de-interleaved into Filament's separate attribute buffers.
+/// All fields are isolate-transferable (typed lists / primitives).
+class _PreparedModel {
+  _PreparedModel({
+    required this.positions,
+    required this.normals,
+    required this.uvs,
+    required this.indices,
+    required this.indexType,
+    required this.vertexCount,
+    required this.triangleCount,
+    required this.centerX,
+    required this.centerY,
+    required this.centerZ,
+    required this.camDistance,
+    required this.parseMs,
+  });
+
+  final Float32List positions; // 3 floats / vertex
+  final Float32List normals; // 3 floats / vertex
+  final Float32List uvs; // 2 floats / vertex
+  final List<int> indices; // Uint16List or Uint32List
+  final IndexType indexType;
+  final int vertexCount;
+  final int triangleCount;
+  final double centerX, centerY, centerZ;
+  final double camDistance;
   final int parseMs;
 }
 
-/// Isolate entry point: reads + parses the file, timing only the parse.
-ParsedModel _parseModelEntry(_ParseRequest req) {
+/// Isolate entry: read + parse, then split the interleaved buffer into the
+/// separate position/normal/uv buffers Filament's geometry builder expects.
+_PreparedModel _prepareModelEntry(_ParseRequest req) {
   final bytes = File(req.path).readAsBytesSync();
   final sw = Stopwatch()..start();
   final mesh = ModelParser.parse(bytes, format: req.format);
+  final n = mesh.vertexCount;
+  final src = mesh.vertices; // interleaved [px,py,pz,nx,ny,nz,u,v,r,g,b,a]
+  final positions = Float32List(n * 3);
+  final normals = Float32List(n * 3);
+  final uvs = Float32List(n * 2);
+  for (var i = 0; i < n; i++) {
+    final s = i * kFloatsPerVertex;
+    positions[i * 3] = src[s];
+    positions[i * 3 + 1] = src[s + 1];
+    positions[i * 3 + 2] = src[s + 2];
+    normals[i * 3] = src[s + 3];
+    normals[i * 3 + 1] = src[s + 4];
+    normals[i * 3 + 2] = src[s + 5];
+    uvs[i * 2] = src[s + 6];
+    uvs[i * 2 + 1] = src[s + 7];
+  }
+
+  // Index buffer: reuse OBJ's indices, or synthesize sequential ones for STL
+  // (which is inherently non-indexed). Pick the narrowest index type that fits.
+  final List<int> indices;
+  final IndexType indexType;
+  if (mesh.indices16 != null) {
+    indices = mesh.indices16!;
+    indexType = IndexType.USHORT;
+  } else if (mesh.indices32 != null) {
+    indices = mesh.indices32!;
+    indexType = IndexType.UINT;
+  } else if (n <= 0x10000) {
+    indices = Uint16List(n);
+    for (var i = 0; i < n; i++) {
+      indices[i] = i;
+    }
+    indexType = IndexType.USHORT;
+  } else {
+    indices = Uint32List(n);
+    for (var i = 0; i < n; i++) {
+      indices[i] = i;
+    }
+    indexType = IndexType.UINT;
+  }
+
   sw.stop();
-  return ParsedModel(mesh, sw.elapsedMilliseconds);
+
+  final b = mesh.bounds;
+  final radius = 0.5 *
+      math.sqrt(b.sizeX * b.sizeX + b.sizeY * b.sizeY + b.sizeZ * b.sizeZ);
+  final camDistance = radius <= 0 ? 5.0 : radius * 3.0;
+
+  return _PreparedModel(
+    positions: positions,
+    normals: normals,
+    uvs: uvs,
+    indices: indices,
+    indexType: indexType,
+    vertexCount: n,
+    triangleCount: mesh.triangleCount,
+    centerX: b.centerX,
+    centerY: b.centerY,
+    centerZ: b.centerZ,
+    camDistance: camDistance,
+    parseMs: sw.elapsedMilliseconds,
+  );
 }

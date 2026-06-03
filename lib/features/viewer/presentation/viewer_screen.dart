@@ -16,8 +16,9 @@ import '../data/gpu_support.dart';
 import '../data/native_stats.dart';
 import 'scene_view.dart';
 
-/// Interactive 3D viewer. Renders the model natively with flutter_scene
-/// (Flutter GPU / Impeller) — see ADR-001. The render surface, orbit controls,
+/// Interactive 3D viewer. Renders the model natively with Thermion (Google
+/// Filament) — see ADR-002; the prior flutter_scene line (ADR-001) was frozen
+/// over an Impeller GPU-memory floor. The render surface, orbit controls,
 /// render modes, preset cameras and thumbnail capture live in [ModelSceneView];
 /// this screen owns the surrounding chrome (toolbar, panels, prev/next nav).
 class ViewerScreen extends ConsumerStatefulWidget {
