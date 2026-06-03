@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../../app/theme/prism_colors.dart';
@@ -46,12 +47,21 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   Map<String, int>? _mem;
   Timer? _pssTimer;
 
+  /// App version + build (e.g. "0.3.0+3"), shown in the Info panel so the build
+  /// under test is identifiable on-device.
+  String? _appVersion;
+
   @override
   void initState() {
     super.initState();
     _model = widget.model;
     GpuSupport.isSupported().then((ok) {
       if (mounted) setState(() => _gpuSupported = ok);
+    });
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) {
+        setState(() => _appVersion = '${info.version}+${info.buildNumber}');
+      }
     });
     if (!kReleaseMode) {
       _pssTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
@@ -176,6 +186,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                   verts: _status.verts,
                   ms: _status.parseMs,
                   mem: _mem,
+                  appVersion: _appVersion,
                 )),
         ],
       ),
@@ -440,12 +451,14 @@ class _InfoPanel extends StatelessWidget {
     this.verts,
     this.ms,
     this.mem,
+    this.appVersion,
   });
   final LibraryModel model;
   final int? tris;
   final int? verts;
   final int? ms;
   final Map<String, int>? mem;
+  final String? appVersion;
 
   @override
   Widget build(BuildContext context) {
@@ -468,6 +481,7 @@ class _InfoPanel extends StatelessWidget {
         ['• DART', mb('java')],
         ['• CODE', mb('code')],
       ],
+      ['APP', appVersion ?? '—'],
     ];
     return _Panel(
       label: 'INFO',
