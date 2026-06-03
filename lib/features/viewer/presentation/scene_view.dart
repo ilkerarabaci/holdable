@@ -56,12 +56,12 @@ class ModelSceneController {
 ///
 /// Orbit is driven by our own [GestureDetector] math (azimuth / elevation /
 /// radius around the model center) rather than Thermion's built-in fixed-orbit
-/// handler — that handler felt stiff and couldn't zoom in past the framing
-/// distance. This restores the free, responsive feel of the v0.2 viewer.
+/// handler — that handler felt stiff and couldn't zoom in. This restores the
+/// free, responsive feel of the v0.2 viewer.
 ///
-/// Keeps the same widget contract as the prior renderer lines so the host
-/// [ViewerScreen] is unchanged. Solid shading + orbit + presets + color; render
-/// modes (wireframe / x-ray) and thumbnail capture follow.
+/// Render modes (solid / wireframe / x-ray) rebuild the asset with the matching
+/// geometry + material; color is a live base-color swap. Keeps the same widget
+/// contract as the prior renderer lines so the host [ViewerScreen] is unchanged.
 class ModelSceneView extends StatefulWidget {
   const ModelSceneView({
     super.key,
@@ -84,17 +84,30 @@ class ModelSceneView extends StatefulWidget {
   State<ModelSceneView> createState() => _ModelSceneViewState();
 }
 
+/// Default model surface color until the user picks one (a light neutral).
+const Color _kNeutral = Color(0xFFD1D1DB);
+
 class _ModelSceneViewState extends State<ModelSceneView> {
   ThermionViewer? _viewer;
   Camera? _camera;
   ThermionAsset? _asset;
   MaterialInstance? _material;
 
-  /// Just-parsed model awaiting GPU upload (set on parse, nulled after upload).
-  _PreparedModel? _pending;
+  /// Parsed + de-interleaved model. Retained after upload so render modes can
+  /// rebuild the asset (TRIANGLES vs LINES) without re-reading the file.
+  _PreparedModel? _model;
+
+  /// Triangle-edge index buffer for wireframe, built lazily from [_model].
+  List<int>? _lineIndices;
 
   bool _viewerReady = false;
-  bool _hasModel = false; // a geometry is on screen
+  bool _hasModel = false;
+
+  String _mode = 'solid';
+  Color _baseColor = _kNeutral;
+  double _currentAlpha = 1.0; // 0.35 in x-ray
+  bool _rebuilding = false;
+  String? _pendingMode; // latest mode requested while a rebuild was in flight
 
   // --- Orbit state: spherical camera around the (origin-centered) model. ---
   double _azimuth = _isoAzimuth;
@@ -102,16 +115,16 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   double _radius = 5;
   double _minRadius = 0.5;
   double _maxRadius = 50;
-  double _startRadius = 5; // captured on gesture start for pinch-zoom
+  double _startRadius = 5;
 
-  // Coalesce camera writes: lookAt is async FFI, so we never let updates queue
-  // unbounded — apply the latest pose, re-apply only if it changed meanwhile.
   bool _applyingCamera = false;
   bool _cameraDirty = false;
 
   static const double _isoAzimuth = math.pi / 4;
-  static const double _isoElevation = 0.6; // ~34° above the horizon
+  static const double _isoElevation = 0.6;
   static const double _elevationLimit = math.pi / 2 - 0.05;
+  static const double _rotSpeed = 0.01; // rad per px
+  static const double _xrayAlpha = 0.35;
 
   @override
   void initState() {
@@ -132,7 +145,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     widget.controller._detach(this);
     final viewer = _viewer;
     _viewer = null;
-    viewer?.dispose(); // fire-and-forget; unloads scene, leaves engine intact
+    viewer?.dispose();
     super.dispose();
   }
 
@@ -141,22 +154,31 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     try {
       final viewer = await ThermionFlutterPlugin.createViewer();
       await viewer.setPostProcessing(true);
-      await viewer.setAntiAliasing(false, true, false); // FXAA only
+      await viewer.setAntiAliasing(false, true, false); // FXAA
       await viewer.setBackgroundColor(
         widget.background.r,
         widget.background.g,
         widget.background.b,
         1.0,
       );
-      // A single directional "sun" so the PBR material is shaded (no IBL/skybox
-      // is loaded, so an unlit scene would render flat/black).
-      await viewer.addDirectLight(
-        DirectLight.sun(
-          direction: Vector3(0.3, -0.8, 0.5)..normalize(),
-          intensity: 80000,
-          castShadows: false,
-        ),
-      );
+      // No IBL/skybox is bundled, so lighting is entirely direct. A single sun
+      // leaves the far side pure black; a key + fill + rim trio approximates
+      // ambient so the whole model reads.
+      await viewer.addDirectLight(DirectLight.sun(
+        direction: Vector3(0.3, -0.8, 0.5)..normalize(),
+        intensity: 70000,
+        castShadows: false,
+      ));
+      await viewer.addDirectLight(DirectLight.sun(
+        direction: Vector3(-0.6, -0.2, -0.5)..normalize(),
+        intensity: 38000,
+        castShadows: false,
+      ));
+      await viewer.addDirectLight(DirectLight.sun(
+        direction: Vector3(0.1, 0.9, -0.3)..normalize(),
+        intensity: 22000,
+        castShadows: false,
+      ));
       final camera = await viewer.getActiveCamera();
       if (!mounted) {
         await viewer.dispose();
@@ -165,9 +187,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       _viewer = viewer;
       _camera = camera;
       _viewerReady = true;
-      if (_pending != null) {
-        await _upload();
-      }
+      if (_model != null) await _applyMode(_mode, frame: true);
     } catch (e) {
       if (mounted) widget.onStatus(ModelSceneStatus(loading: false, error: '$e'));
     }
@@ -181,21 +201,30 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         _ParseRequest(widget.filePath, widget.format),
       );
       if (!mounted) return;
-      _pending = prepared;
-      if (_viewerReady) await _upload();
+      _model = prepared;
+      _lineIndices = null; // invalidate the previous model's wireframe cache
+      if (_viewerReady) await _applyMode(_mode, frame: true);
     } catch (e) {
       if (!mounted) return;
       widget.onStatus(ModelSceneStatus(loading: false, error: '$e'));
     }
   }
 
-  /// Uploads the pending model to the GPU, framing the camera to it.
-  Future<void> _upload() async {
+  /// Builds (or rebuilds) the on-screen asset for [mode], optionally framing the
+  /// camera to it (on first load / model change). Coalesces rapid mode taps.
+  Future<void> _applyMode(String mode, {bool frame = false}) async {
     final viewer = _viewer;
-    final p = _pending;
+    final p = _model;
     if (viewer == null || p == null) return;
+    if (_rebuilding) {
+      _pendingMode = mode; // apply once the in-flight rebuild finishes
+      return;
+    }
+    _rebuilding = true;
     try {
-      // Replace any previous model (prev/next navigation).
+      _mode = mode;
+      if (frame) widget.onStatus(const ModelSceneStatus(loading: true));
+
       final old = _asset;
       if (old != null) {
         await viewer.destroyAsset(old);
@@ -203,63 +232,113 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         _material = null;
       }
 
-      final geometry = Geometry(
-        p.positions,
-        p.indices,
-        normals: p.normals,
-        uvs: p.uvs,
-        indexType: p.indexType,
-      );
+      final bool wireframe = mode == 'wireframe';
+      final bool xray = mode == 'xray';
+      _currentAlpha = xray ? _xrayAlpha : 1.0;
 
-      final material = await FilamentApp.instance!.createUbershaderMaterialInstance();
-      await material.setParameterFloat4('baseColorFactor', 0.82, 0.82, 0.86, 1.0);
-      // OBJ/STL winding is inconsistent — draw both faces.
+      // Geometry: triangles for solid/x-ray, line topology for wireframe.
+      final Geometry geometry;
+      if (wireframe) {
+        final lines = _lineIndices ??= _buildLineIndices(p);
+        geometry = Geometry(
+          p.positions,
+          lines,
+          primitiveType: PrimitiveType.LINES,
+          indexType: p.indexType,
+        );
+      } else {
+        geometry = Geometry(
+          p.positions,
+          p.indices,
+          normals: p.normals,
+          uvs: p.uvs,
+          indexType: p.indexType,
+        );
+      }
+
+      // Material: lit ubershader for solid, blended for x-ray, unlit for the
+      // wireframe (line shading is meaningless).
+      final material = await FilamentApp.instance!.createUbershaderMaterialInstance(
+        unlit: wireframe,
+        alphaMode: xray ? AlphaMode.BLEND : AlphaMode.OPAQUE,
+      );
       await material.setCullingMode(CullingMode.NONE);
+      if (xray) await material.setTransparencyMode(TransparencyMode.DEFAULT);
+      await _applyColorTo(material);
 
       final asset = await viewer.createGeometry(
         geometry,
         materialInstances: [material],
-        releaseSourceData: true,
+        releaseSourceData: false, // keep buffers for other render modes
       );
       _asset = asset;
       _material = material;
 
-      // Center the model at the origin so the orbit pivot + framing are stable.
       await FilamentApp.instance!.setTransform(
         asset.entity,
         Matrix4.translation(Vector3(-p.centerX, -p.centerY, -p.centerZ)),
       );
       await viewer.addToScene(asset);
 
-      // Frame the camera: iso view at a comfortable distance, with zoom limits.
-      final modelRadius = p.camDistance / 3.0; // camDistance == radius * 3
-      _radius = p.camDistance;
-      _startRadius = _radius;
-      _minRadius = math.max(modelRadius * 0.4, 0.05);
-      _maxRadius = p.camDistance * 5.0;
-      _azimuth = _isoAzimuth;
-      _elevation = _isoElevation;
-      await _applyCameraNow();
+      if (frame) {
+        final modelRadius = p.camDistance / 3.0;
+        _radius = p.camDistance;
+        _startRadius = _radius;
+        _minRadius = math.max(modelRadius * 0.4, 0.05);
+        _maxRadius = p.camDistance * 5.0;
+        _azimuth = _isoAzimuth;
+        _elevation = _isoElevation;
+        await _applyCameraNow();
+      }
 
-      _pending = null; // drop the CPU-side copy now it's on the GPU
-      _hasModel = true;
-      if (mounted) setState(() {});
-      widget.onStatus(
-        ModelSceneStatus(
+      if (!_hasModel || frame) {
+        _hasModel = true;
+        if (mounted) setState(() {});
+      }
+      if (frame) {
+        widget.onStatus(ModelSceneStatus(
           loading: false,
           verts: p.vertexCount,
           tris: p.triangleCount,
           parseMs: p.parseMs,
-        ),
-      );
+        ));
+      }
     } catch (e) {
       if (mounted) widget.onStatus(ModelSceneStatus(loading: false, error: '$e'));
+    } finally {
+      _rebuilding = false;
+      final next = _pendingMode;
+      if (next != null && next != _mode) {
+        _pendingMode = null;
+        await _applyMode(next);
+      } else {
+        _pendingMode = null;
+      }
     }
+  }
+
+  /// Builds the line-pair index buffer (3 edges per triangle) for wireframe.
+  List<int> _buildLineIndices(_PreparedModel p) {
+    final tri = p.indices;
+    final triCount = tri.length ~/ 3;
+    final out = p.indexType == IndexType.USHORT
+        ? Uint16List(triCount * 6)
+        : Uint32List(triCount * 6);
+    var w = 0;
+    for (var t = 0; t < triCount; t++) {
+      final a = tri[t * 3], b = tri[t * 3 + 1], c = tri[t * 3 + 2];
+      out[w++] = a;
+      out[w++] = b;
+      out[w++] = b;
+      out[w++] = c;
+      out[w++] = c;
+      out[w++] = a;
+    }
+    return out;
   }
 
   // --- Camera control -------------------------------------------------------
 
-  /// Camera position on the sphere around the origin, from the orbit angles.
   Vector3 _orbitPosition() {
     final ce = math.cos(_elevation);
     return Vector3(
@@ -269,15 +348,12 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     );
   }
 
-  /// Applies the current orbit pose immediately (used for framing/presets).
   Future<void> _applyCameraNow() async {
     final cam = _camera;
     if (cam == null) return;
     await cam.lookAt(_orbitPosition(), focus: Vector3.zero(), up: Vector3(0, 1, 0));
   }
 
-  /// Requests a camera update, coalescing rapid gesture deltas so async lookAt
-  /// calls never queue up.
   void _requestCamera() {
     _cameraDirty = true;
     if (_applyingCamera) return;
@@ -304,11 +380,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   }
 
   void _onScaleUpdate(ScaleUpdateDetails d) {
-    // Pinch → zoom (radius is relative to the gesture-start radius).
     if (d.scale != 1.0) {
       _radius = (_startRadius / d.scale).clamp(_minRadius, _maxRadius);
     }
-    // Drag → rotate. focalPointDelta is the per-update movement in px.
     final dp = d.focalPointDelta;
     if (dp != Offset.zero) {
       _azimuth -= dp.dx * _rotSpeed;
@@ -318,9 +392,6 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     _requestCamera();
   }
 
-  static const double _rotSpeed = 0.01; // rad per px — tuned for a free feel
-
-  /// Snaps the camera to a preset direction, keeping the current radius.
   Future<void> _setPreset(String preset) async {
     switch (preset) {
       case 'front':
@@ -340,24 +411,36 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     await _applyCameraNow();
   }
 
-  /// Sets the model's base color (linear RGB; the light shades it).
-  Future<void> _setColor(Color color) async {
-    await _material?.setParameterFloat4(
-        'baseColorFactor', color.r, color.g, color.b, 1.0);
+  /// Writes the current base color (sRGB → linear) into [mi] at the mode alpha.
+  Future<void> _applyColorTo(MaterialInstance mi) async {
+    await mi.setParameterFloat4(
+      'baseColorFactor',
+      _srgbToLinear(_baseColor.r),
+      _srgbToLinear(_baseColor.g),
+      _srgbToLinear(_baseColor.b),
+      _currentAlpha,
+    );
   }
 
-  // Render-mode swap. Solid is the only mode this build renders; wireframe and
-  // x-ray land in the follow-up alongside thumbnail capture.
-  void _setRenderMode(String mode) {
-    // Intentionally a no-op for now (solid). Kept so the host's Render panel
-    // chips don't break the controller contract.
+  Future<void> _setColor(Color color) async {
+    _baseColor = color;
+    final mi = _material;
+    if (mi != null) await _applyColorTo(mi);
   }
+
+  void _setRenderMode(String mode) {
+    _applyMode(mode);
+  }
+
+  /// sRGB component → linear, so Filament's linear baseColorFactor shows the
+  /// intended hue (passing raw sRGB washes the color out / shifts the hue).
+  static double _srgbToLinear(double c) =>
+      c <= 0.04045 ? c / 12.92 : math.pow((c + 0.055) / 1.055, 2.4).toDouble();
 
   @override
   Widget build(BuildContext context) {
     final viewer = _viewer;
     if (!_hasModel || viewer == null) {
-      // Still creating the viewer / parsing — host shows the spinner over this.
       return ColoredBox(color: widget.background);
     }
     return GestureDetector(
@@ -379,7 +462,6 @@ class _ParseRequest {
 }
 
 /// Parsed model, de-interleaved into Filament's separate attribute buffers.
-/// All fields are isolate-transferable (typed lists / primitives).
 class _PreparedModel {
   _PreparedModel({
     required this.positions,
@@ -399,7 +481,7 @@ class _PreparedModel {
   final Float32List positions; // 3 floats / vertex
   final Float32List normals; // 3 floats / vertex
   final Float32List uvs; // 2 floats / vertex
-  final List<int> indices; // Uint16List or Uint32List
+  final List<int> indices; // triangle indices (Uint16List or Uint32List)
   final IndexType indexType;
   final int vertexCount;
   final int triangleCount;
