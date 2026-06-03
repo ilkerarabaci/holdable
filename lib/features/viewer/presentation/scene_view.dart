@@ -109,13 +109,17 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   bool _rebuilding = false;
   String? _pendingMode; // latest mode requested while a rebuild was in flight
 
-  // --- Orbit state: spherical camera around the (origin-centered) model. ---
+  // --- Orbit state: spherical camera around the (panned) model center. ---
   double _azimuth = _isoAzimuth;
   double _elevation = _isoElevation;
   double _radius = 5;
   double _minRadius = 0.5;
   double _maxRadius = 50;
   double _startRadius = 5;
+
+  /// Camera pivot, shifted by two-finger pan so the model can be moved up out
+  /// from behind the bottom panel (or recentered). Origin = model center.
+  final Vector3 _target = Vector3.zero();
 
   bool _applyingCamera = false;
   bool _cameraDirty = false;
@@ -124,6 +128,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   static const double _isoElevation = 0.6;
   static const double _elevationLimit = math.pi / 2 - 0.05;
   static const double _rotSpeed = 0.01; // rad per px
+  static const double _panSpeed = 0.0015; // world units per px, scaled by radius
   static const double _xrayAlpha = 0.35;
 
   @override
@@ -261,6 +266,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       final material = await FilamentApp.instance!.createUbershaderMaterialInstance(
         unlit: wireframe,
         alphaMode: xray ? AlphaMode.BLEND : AlphaMode.OPAQUE,
+        // Double-sided so back faces are lit with flipped normals — otherwise
+        // the inside/under faces (OBJ/STL winding is inconsistent) stay black
+        // and the color doesn't read on every surface.
+        doubleSided: true,
       );
       await material.setCullingMode(CullingMode.NONE);
       if (xray) await material.setTransparencyMode(TransparencyMode.DEFAULT);
@@ -288,6 +297,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         _maxRadius = p.camDistance * 5.0;
         _azimuth = _isoAzimuth;
         _elevation = _isoElevation;
+        _target.setZero();
         await _applyCameraNow();
       }
 
@@ -339,7 +349,8 @@ class _ModelSceneViewState extends State<ModelSceneView> {
 
   // --- Camera control -------------------------------------------------------
 
-  Vector3 _orbitPosition() {
+  /// Camera offset from the pivot, on the orbit sphere.
+  Vector3 _orbitOffset() {
     final ce = math.cos(_elevation);
     return Vector3(
       _radius * ce * math.sin(_azimuth),
@@ -348,10 +359,12 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     );
   }
 
+  Vector3 _orbitPosition() => _target + _orbitOffset();
+
   Future<void> _applyCameraNow() async {
     final cam = _camera;
     if (cam == null) return;
-    await cam.lookAt(_orbitPosition(), focus: Vector3.zero(), up: Vector3(0, 1, 0));
+    await cam.lookAt(_orbitPosition(), focus: _target, up: Vector3(0, 1, 0));
   }
 
   void _requestCamera() {
@@ -367,8 +380,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     try {
       while (_cameraDirty) {
         _cameraDirty = false;
-        await cam.lookAt(_orbitPosition(),
-            focus: Vector3.zero(), up: Vector3(0, 1, 0));
+        await cam.lookAt(_orbitPosition(), focus: _target, up: Vector3(0, 1, 0));
       }
     } finally {
       _applyingCamera = false;
@@ -385,9 +397,26 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     }
     final dp = d.focalPointDelta;
     if (dp != Offset.zero) {
-      _azimuth -= dp.dx * _rotSpeed;
-      _elevation =
-          (_elevation + dp.dy * _rotSpeed).clamp(-_elevationLimit, _elevationLimit);
+      if (d.pointerCount >= 2) {
+        // Two-finger drag → pan the pivot (move the model in-frame, e.g. up out
+        // from behind the bottom panel). Translate along the camera's right/up
+        // axes, scaled by radius so it feels consistent at any zoom.
+        final forward = (-_orbitOffset()).normalized();
+        final right = forward.cross(Vector3(0, 1, 0));
+        if (right.length2 > 1e-9) {
+          right.normalize();
+          final camUp = right.cross(forward)..normalize();
+          final k = _panSpeed * _radius;
+          _target
+            ..add(right * (-dp.dx * k))
+            ..add(camUp * (dp.dy * k));
+        }
+      } else {
+        // One finger → orbit.
+        _azimuth -= dp.dx * _rotSpeed;
+        _elevation = (_elevation + dp.dy * _rotSpeed)
+            .clamp(-_elevationLimit, _elevationLimit);
+      }
     }
     _requestCamera();
   }
@@ -408,6 +437,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         _azimuth = _isoAzimuth;
         _elevation = _isoElevation;
     }
+    _target.setZero(); // recenter when snapping to a preset
     await _applyCameraNow();
   }
 

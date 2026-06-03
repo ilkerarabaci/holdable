@@ -47,6 +47,9 @@ dependencies:
   drift: ^2.33.0
   drift_flutter: ^0.3.0
   receive_sharing_intent: ^1.8.1
+  # Reads the running build's version + build number so it can be shown in-app
+  # (Info panel + Settings) — makes which alpha is on the device identifiable.
+  package_info_plus: ^8.1.1
   # v0.3 renderer: Thermion (Google Filament) — manages its own GPU memory,
   # sidestepping the Impeller GPU-retention issue that blocked flutter_scene
   # (ADR-002). flutter_scene + flutter_gpu removed from this line.

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../../app/router.dart';
 import '../../../app/theme/prism_colors.dart';
@@ -54,6 +55,18 @@ class SettingsScreen extends ConsumerWidget {
           Text('Holdable — alpha', style: t.bodyLarge),
           Text('Your 3D, in your pocket. And in your hand.',
               style: t.bodyMedium?.copyWith(color: c.textMuted)),
+          const SizedBox(height: 8),
+          FutureBuilder<PackageInfo>(
+            future: PackageInfo.fromPlatform(),
+            builder: (context, snap) {
+              final v = snap.hasData
+                  ? 'Version ${snap.data!.version} (build ${snap.data!.buildNumber})'
+                  : 'Version —';
+              return Text(v,
+                  style: t.bodyMedium?.copyWith(
+                      color: c.textMuted, fontFamily: 'monospace'));
+            },
+          ),
         ],
       ),
     );
