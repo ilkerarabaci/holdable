@@ -1,7 +1,10 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../../app/router.dart';
 import '../../../app/theme/prism_colors.dart';
@@ -234,7 +237,10 @@ class _ModelGrid extends ConsumerWidget {
             ListTile(
               leading: const Icon(LucideIcons.share2),
               title: const Text('Share'),
-              onTap: () => Navigator.pop(context), // D5
+              onTap: () async {
+                Navigator.pop(context);
+                await _shareModel(context, model);
+              },
             ),
             ListTile(
               leading: const Icon(LucideIcons.trash2),
@@ -247,6 +253,25 @@ class _ModelGrid extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+
+  /// Shares the model's file out to other apps via the system share sheet.
+  /// Uses a friendly `<name>.<ext>` filename even though the file on disk is
+  /// stored as `<id>.<ext>`.
+  Future<void> _shareModel(BuildContext context, LibraryModel model) async {
+    if (!File(model.filePath).existsSync()) return;
+    final fileName = '${model.name}.${model.format.name}';
+    // iPad needs the originating rect for the share popover; harmless elsewhere.
+    final box = context.findRenderObject() as RenderBox?;
+    final origin = box != null
+        ? box.localToGlobal(Offset.zero) & box.size
+        : null;
+    await Share.shareXFiles(
+      [XFile(model.filePath, name: fileName)],
+      subject: model.name,
+      fileNameOverrides: [fileName],
+      sharePositionOrigin: origin,
     );
   }
 
