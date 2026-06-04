@@ -8,8 +8,7 @@ import '../../../app/theme/prism_colors.dart';
 /// D3: presents Files / URL / Sample rows. "Files" is wired to the picker in
 /// D4; URL + Sample stay stubbed for alpha (closed with a "soon" snackbar).
 class ImportSheet extends ConsumerWidget {
-  const ImportSheet(
-      {super.key, this.onPickFiles, this.onPickSamples, this.onPickImage});
+  const ImportSheet({super.key, this.onPickFiles, this.onPickSamples});
 
   /// Injected in D4 (file_picker flow). Null = stubbed.
   final Future<void> Function()? onPickFiles;
@@ -17,22 +16,15 @@ class ImportSheet extends ConsumerWidget {
   /// Opens the bundled sample-model chooser (W2).
   final Future<void> Function()? onPickSamples;
 
-  /// Picks an image and builds a 3D heightmap relief (roadmap tier A).
-  final Future<void> Function()? onPickImage;
-
   static Future<void> show(BuildContext context,
       {Future<void> Function()? onPickFiles,
-      Future<void> Function()? onPickSamples,
-      Future<void> Function()? onPickImage}) {
+      Future<void> Function()? onPickSamples}) {
     return showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (_) => ImportSheet(
-        onPickFiles: onPickFiles,
-        onPickSamples: onPickSamples,
-        onPickImage: onPickImage,
-      ),
+      builder: (_) =>
+          ImportSheet(onPickFiles: onPickFiles, onPickSamples: onPickSamples),
     );
   }
 
@@ -90,19 +82,6 @@ class ImportSheet extends ConsumerWidget {
                   await onPickFiles!();
                 } else {
                   soon('File import');
-                }
-              },
-            ),
-            _Row(
-              icon: LucideIcons.image,
-              title: 'Image → 3D',
-              subtitle: 'Emboss a photo or logo into a relief',
-              onTap: () async {
-                if (onPickImage != null) {
-                  Navigator.of(context).pop();
-                  await onPickImage!();
-                } else {
-                  soon('Image → 3D');
                 }
               },
             ),
