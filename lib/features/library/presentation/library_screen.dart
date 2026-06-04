@@ -84,30 +84,6 @@ Future<void> _runImport(BuildContext context, WidgetRef ref) async {
   }
 }
 
-/// Picks an image and builds a 3D heightmap relief from it (roadmap tier A).
-Future<void> _runImageImport(BuildContext context, WidgetRef ref) async {
-  final result = await ref.read(importServiceProvider).pickImageAndImport();
-  if (!context.mounted) return;
-  final messenger = ScaffoldMessenger.of(context);
-  switch (result.status) {
-    case ImportStatus.added:
-      messenger.showSnackBar(
-        SnackBar(content: Text('Built "${result.model!.name}" from your image')),
-      );
-    case ImportStatus.cancelled:
-      break;
-    case ImportStatus.duplicate:
-      messenger.showSnackBar(
-        SnackBar(content: Text(result.message ?? 'Already in your library')),
-      );
-    case ImportStatus.unsupported:
-    case ImportStatus.error:
-      messenger.showSnackBar(
-        SnackBar(content: Text(result.message ?? "Couldn't build a 3D model")),
-      );
-  }
-}
-
 /// Prism-voice confirmation for a file past the soft size cap
 /// ([kMaxImportBytes]). Returns true if the user chooses to load it anyway.
 Future<bool> _confirmOversize(BuildContext context, int sizeBytes) async {
@@ -171,7 +147,6 @@ class LibraryScreen extends ConsumerWidget {
           context,
           onPickFiles: () => _runImport(context, ref),
           onPickSamples: () => _pickSample(context, ref),
-          onPickImage: () => _runImageImport(context, ref),
         ),
         child: const Icon(LucideIcons.plus),
       ),
@@ -285,19 +260,37 @@ class _ModelGrid extends ConsumerWidget {
   /// Uses a friendly `<name>.<ext>` filename even though the file on disk is
   /// stored as `<id>.<ext>`.
   Future<void> _shareModel(BuildContext context, LibraryModel model) async {
-    if (!File(model.filePath).existsSync()) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (!File(model.filePath).existsSync()) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text("That model's file is missing.")),
+      );
+      return;
+    }
     final fileName = '${model.name}.${model.format.name}';
     // iPad needs the originating rect for the share popover; harmless elsewhere.
     final box = context.findRenderObject() as RenderBox?;
     final origin = box != null
         ? box.localToGlobal(Offset.zero) & box.size
         : null;
-    await Share.shareXFiles(
-      [XFile(model.filePath, name: fileName)],
-      subject: model.name,
-      fileNameOverrides: [fileName],
-      sharePositionOrigin: origin,
-    );
+    try {
+      await Share.shareXFiles(
+        [
+          // Explicit MIME — .obj/.stl have no registered type, so without this
+          // the receiving app gets an empty type and many silently reject it
+          // (the share sheet appears but "Share" does nothing).
+          XFile(model.filePath,
+              name: fileName, mimeType: 'application/octet-stream'),
+        ],
+        subject: model.name,
+        fileNameOverrides: [fileName],
+        sharePositionOrigin: origin,
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text("Couldn't share: $e")),
+      );
+    }
   }
 
   void _showRenameDialog(
