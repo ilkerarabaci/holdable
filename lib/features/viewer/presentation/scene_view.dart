@@ -112,7 +112,11 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   // the live on-screen view — a live-view capture on the load path destabilized
   // the app (alpha.4). The offscreen render is a one-shot and can't stall the
   // interactive render loop.
-  static const bool _thumbnailEnabled = true;
+  // DISABLED again: even the offscreen-View capture crashes the app on device
+  // (Thermion 0.3.4 `capture` on Android is unstable here, on-screen OR
+  // offscreen). Thumbnails need a different approach — investigate separately.
+  // Capture code retained behind the flag for that follow-up.
+  static final bool _thumbnailEnabled = false;
   View? _thumbView; // owns the offscreen render target natively
   Camera? _thumbCamera;
   static const int _thumbRtSize = 512; // square offscreen render-target size
