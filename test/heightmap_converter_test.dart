@@ -30,20 +30,28 @@ void main() {
       expect(mesh.vertexCount, tris * 3);
     });
 
-    test('dark pixels are taller than light when inverted (default)', () {
-      const params = HeightmapParams(); // invert: true
-      final dark = ModelParser.parse(
-          heightmapToStl(rgba: _solid(8, 8, 0), imgW: 8, imgH: 8, params: params)!,
+    test('brighter pixels are taller by default; invert raises dark instead', () {
+      const def = HeightmapParams(); // invert: false (default)
+      final lightDef = ModelParser.parse(
+          heightmapToStl(rgba: _solid(8, 8, 255), imgW: 8, imgH: 8, params: def)!,
           format: 'stl');
-      final light = ModelParser.parse(
-          heightmapToStl(rgba: _solid(8, 8, 255), imgW: 8, imgH: 8, params: params)!,
+      final darkDef = ModelParser.parse(
+          heightmapToStl(rgba: _solid(8, 8, 0), imgW: 8, imgH: 8, params: def)!,
           format: 'stl');
-      // Both start their base at y=0; the dark relief rises higher.
-      expect(dark.bounds.maxY, greaterThan(light.bounds.maxY));
-      // A flat (single-grey) image has a uniform top, so the light one's top is
-      // just the base thickness.
-      expect(light.bounds.maxY, closeTo(params.base, 0.01));
-      expect(dark.bounds.maxY, closeTo(params.base + params.relief, 0.01));
+      // Default: the lit (bright) area rises, the dark area stays at the base.
+      expect(lightDef.bounds.maxY, greaterThan(darkDef.bounds.maxY));
+      expect(darkDef.bounds.maxY, closeTo(def.base, 0.01));
+      expect(lightDef.bounds.maxY, closeTo(def.base + def.relief, 0.01));
+
+      // Inverted: dark line art embosses upward instead.
+      const inv = HeightmapParams(invert: true);
+      final darkInv = ModelParser.parse(
+          heightmapToStl(rgba: _solid(8, 8, 0), imgW: 8, imgH: 8, params: inv)!,
+          format: 'stl');
+      final lightInv = ModelParser.parse(
+          heightmapToStl(rgba: _solid(8, 8, 255), imgW: 8, imgH: 8, params: inv)!,
+          format: 'stl');
+      expect(darkInv.bounds.maxY, greaterThan(lightInv.bounds.maxY));
     });
 
     test('base sits at y=0 (watertight solid, not a floating sheet)', () {

@@ -285,19 +285,37 @@ class _ModelGrid extends ConsumerWidget {
   /// Uses a friendly `<name>.<ext>` filename even though the file on disk is
   /// stored as `<id>.<ext>`.
   Future<void> _shareModel(BuildContext context, LibraryModel model) async {
-    if (!File(model.filePath).existsSync()) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (!File(model.filePath).existsSync()) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text("That model's file is missing.")),
+      );
+      return;
+    }
     final fileName = '${model.name}.${model.format.name}';
     // iPad needs the originating rect for the share popover; harmless elsewhere.
     final box = context.findRenderObject() as RenderBox?;
     final origin = box != null
         ? box.localToGlobal(Offset.zero) & box.size
         : null;
-    await Share.shareXFiles(
-      [XFile(model.filePath, name: fileName)],
-      subject: model.name,
-      fileNameOverrides: [fileName],
-      sharePositionOrigin: origin,
-    );
+    try {
+      await Share.shareXFiles(
+        [
+          // Explicit MIME — .obj/.stl have no registered type, so without this
+          // the receiving app gets an empty type and many silently reject it
+          // (the share sheet appears but "Share" does nothing).
+          XFile(model.filePath,
+              name: fileName, mimeType: 'application/octet-stream'),
+        ],
+        subject: model.name,
+        fileNameOverrides: [fileName],
+        sharePositionOrigin: origin,
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text("Couldn't share: $e")),
+      );
+    }
   }
 
   void _showRenameDialog(

@@ -11,14 +11,15 @@ import 'dart:typed_data';
 /// plaque/coin — rather than a paper-thin sheet, and feeds the existing STL
 /// pipeline (parser → viewer → thumbnail) with no renderer changes.
 
-/// Tunables for the relief. Defaults aim at line-art / logos (dark = raised).
+/// Tunables for the relief.
 class HeightmapParams {
   const HeightmapParams({
     this.gridMax = 160,
     this.planeSize = 100.0,
-    this.relief = 18.0,
+    this.relief = 16.0,
     this.base = 6.0,
-    this.invert = true,
+    this.invert = false,
+    this.smoothPasses = 2,
   });
 
   /// Max grid nodes along the longer image axis (caps triangle count).
@@ -33,9 +34,15 @@ class HeightmapParams {
   /// Flat base thickness under the relief.
   final double base;
 
-  /// When true, darker pixels are taller — so black-on-white line art (logos,
-  /// signatures) embosses *upward*. False = brighter pixels are taller.
+  /// When true, darker pixels are taller (black-on-white line art / logos /
+  /// signatures emboss *upward*). False (default) = brighter pixels are taller,
+  /// which is more natural for photos — the lit subject rises, shadows recede.
   final bool invert;
+
+  /// Box-blur passes over the height field. Tames per-pixel spikes and JPEG
+  /// noise into a smooth relief (a raw photo heightmap is otherwise spiky). 0 =
+  /// off (crisp, for clean line art).
+  final int smoothPasses;
 }
 
 /// Builds a binary-STL byte buffer from a decoded RGBA image ([rgba] is
@@ -68,19 +75,39 @@ Uint8List? heightmapToStl({
     worldW = params.planeSize * imgW / imgH;
   }
 
-  // Sample a height for each grid node from the image luminance.
-  // Layout: X = image columns, Z = image rows, Y = up (relief).
-  final heights = Float32List(gw * gh);
+  // Sample a normalized height (0..1) for each grid node by BLOCK-AVERAGING the
+  // image luminance over the node's source cell — anti-aliases away per-pixel
+  // noise (vs. a single nearest sample, which made photos spiky). Layout:
+  // X = image columns, Z = image rows, Y = up (relief).
+  final vGrid = Float32List(gw * gh);
+  final halfW = (imgW / gw / 2).ceil();
+  final halfH = (imgH / gh / 2).ceil();
   for (var j = 0; j < gh; j++) {
-    final iy = gh == 1 ? 0 : (j * (imgH - 1) / (gh - 1)).round();
+    final cy = (j * (imgH - 1) / (gh - 1)).round();
+    final iy0 = math.max(0, cy - halfH), iy1 = math.min(imgH - 1, cy + halfH);
     for (var i = 0; i < gw; i++) {
-      final ix = gw == 1 ? 0 : (i * (imgW - 1) / (gw - 1)).round();
-      final p = (iy * imgW + ix) * 4;
-      // Relative luminance (Rec. 709) on the raw sRGB bytes — fine for a height.
-      final lum = (0.2126 * rgba[p] + 0.7152 * rgba[p + 1] + 0.0722 * rgba[p + 2]) / 255.0;
-      final v = params.invert ? (1.0 - lum) : lum;
-      heights[j * gw + i] = params.base + v * params.relief;
+      final cx = (i * (imgW - 1) / (gw - 1)).round();
+      final ix0 = math.max(0, cx - halfW), ix1 = math.min(imgW - 1, cx + halfW);
+      var sum = 0.0;
+      var count = 0;
+      for (var yy = iy0; yy <= iy1; yy++) {
+        for (var xx = ix0; xx <= ix1; xx++) {
+          final p = (yy * imgW + xx) * 4;
+          // Relative luminance (Rec. 709) on the raw sRGB bytes.
+          sum += 0.2126 * rgba[p] + 0.7152 * rgba[p + 1] + 0.0722 * rgba[p + 2];
+          count++;
+        }
+      }
+      final lum = (sum / count) / 255.0;
+      vGrid[j * gw + i] = params.invert ? (1.0 - lum) : lum;
     }
+  }
+  // Smooth the height field to turn a spiky photo heightmap into a clean relief.
+  _boxBlur(vGrid, gw, gh, params.smoothPasses);
+
+  final heights = Float32List(gw * gh);
+  for (var k = 0; k < heights.length; k++) {
+    heights[k] = params.base + vGrid[k] * params.relief;
   }
 
   double xAt(int i) => -worldW / 2 + worldW * i / (gw - 1);
@@ -172,4 +199,30 @@ Uint8List? heightmapToStl({
   }
 
   return out.buffer.asUint8List();
+}
+
+/// In-place 3×3 box blur over a [w]×[h] grid, [passes] times (edges clamp).
+void _boxBlur(Float32List g, int w, int h, int passes) {
+  if (passes <= 0 || w < 3 || h < 3) return;
+  final tmp = Float32List(g.length);
+  for (var p = 0; p < passes; p++) {
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w; x++) {
+        var sum = 0.0;
+        var count = 0;
+        for (var dy = -1; dy <= 1; dy++) {
+          final yy = y + dy;
+          if (yy < 0 || yy >= h) continue;
+          for (var dx = -1; dx <= 1; dx++) {
+            final xx = x + dx;
+            if (xx < 0 || xx >= w) continue;
+            sum += g[yy * w + xx];
+            count++;
+          }
+        }
+        tmp[y * w + x] = sum / count;
+      }
+    }
+    g.setAll(0, tmp);
+  }
 }

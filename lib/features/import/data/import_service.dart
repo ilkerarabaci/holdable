@@ -29,11 +29,13 @@ class ImportService {
   ImportService(this.ref);
   final Ref ref;
 
-  /// Filters a set of incoming paths down to supported model files. Pure, so
-  /// the share-intent handler can be reasoned about and tested without IO.
+  /// Filters a set of incoming paths down to ones we can ingest — model files
+  /// (.obj/.stl) or images (turned into a 3D relief). Pure, so the share-intent
+  /// handler can be reasoned about and tested without IO.
   static List<String> supportedPaths(Iterable<String> paths) => [
         for (final p in paths)
-          if (ModelFormat.fromExtension(_ext(p)) != null) p,
+          if (ModelFormat.fromExtension(_ext(p)) != null || isSupportedImage(p))
+            p,
       ];
 
   Future<ImportResult> pickAndImport({
@@ -58,9 +60,12 @@ class ImportService {
     if (picked.path == null) {
       return const ImportResult(ImportStatus.unsupported);
     }
-    // Soft cap: very large models load slowly and can push memory past budget
-    // (see docs/perf-w3-baseline.md). Let the UI confirm before importing.
-    if (picked.size > kMaxImportBytes && confirmOversize != null) {
+    // Soft cap: very large MODELS load slowly and can push memory past budget
+    // (see docs/perf-w3-baseline.md). Images don't apply — they convert to a
+    // grid-bounded STL — so only prompt for model files.
+    if (!isSupportedImage(picked.path!) &&
+        picked.size > kMaxImportBytes &&
+        confirmOversize != null) {
       final proceed = await confirmOversize(picked.size);
       if (!proceed) return const ImportResult(ImportStatus.cancelled);
     }
@@ -68,9 +73,13 @@ class ImportService {
   }
 
   /// Copies the file at [path] into app storage and registers it. Used by both
-  /// the picker and the share-intent flow.
+  /// the picker and the share-intent flow. Images are routed to the Image → 3D
+  /// heightmap path so dropping/sharing a photo into Holdable just works.
   Future<ImportResult> importPath(String path,
       {String? displayName, int? size}) async {
+    if (isSupportedImage(path)) {
+      return importImageAs3D(path, displayName: displayName);
+    }
     final format = ModelFormat.fromExtension(_ext(path));
     if (format == null) {
       return const ImportResult(ImportStatus.unsupported,

@@ -34,12 +34,15 @@ class SharingService {
     for (final path in ImportService.supportedPaths(paths)) {
       // Share-intent has no UI to confirm an oversize import (the file-picker
       // path prompts; see kMaxImportBytes), so skip files past the cap rather
-      // than silently loading something that runs hot.
-      final size = _sizeOf(path);
-      if (size != null && size > kMaxImportBytes) {
-        developer.log('Skipped oversize shared file ($size bytes): $path',
-            name: 'SharingService');
-        continue;
+      // than silently loading something that runs hot. Images are exempt —
+      // they convert to a grid-bounded STL regardless of source size.
+      if (!ImportService.isSupportedImage(path)) {
+        final size = _sizeOf(path);
+        if (size != null && size > kMaxImportBytes) {
+          developer.log('Skipped oversize shared file ($size bytes): $path',
+              name: 'SharingService');
+          continue;
+        }
       }
       await importer.importPath(path);
     }
