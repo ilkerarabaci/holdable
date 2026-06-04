@@ -1,5 +1,5 @@
 name: holdable
-description: "A new Flutter project."
+description: "Holdable — your 3D, in your pocket. Import and view .obj/.stl models."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -16,7 +16,10 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+# v0.3 = Thermion (Google Filament) native renderer line. Prior lines kept for
+# rollback: v0.1 WebView (tag v0.1.0-alpha-webview), v0.2 flutter_scene (tag
+# v0.2.0-alpha-flutterscene). See docs/adr-002-renderer-reassessment.md.
+version: 0.3.0+7
 
 environment:
   sdk: ^3.12.0
@@ -44,7 +47,15 @@ dependencies:
   drift: ^2.33.0
   drift_flutter: ^0.3.0
   receive_sharing_intent: ^1.8.1
-  webview_flutter: ^4.13.1
+  # Reads the running build's version + build number so it can be shown in-app
+  # (Info panel + Settings) — makes which alpha is on the device identifiable.
+  package_info_plus: ^8.1.1
+  # v0.3 renderer: Thermion (Google Filament) — manages its own GPU memory,
+  # sidestepping the Impeller GPU-retention issue that blocked flutter_scene
+  # (ADR-002). flutter_scene + flutter_gpu removed from this line.
+  thermion_flutter: ^0.3.4
+  # Vector/matrix math for the camera + transforms (also a thermion dep).
+  vector_math: ^2.1.4
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -58,6 +69,23 @@ dev_dependencies:
   drift_dev: ^2.33.0
   build_runner: ^2.15.0
 
+# The pub.dev thermion_flutter 0.3.4 was published with an old build-hooks
+# constraint (hooks ^0.20.1) that conflicts with our drift/sqlite3 stack
+# (hooks >=1.0.0). The repo's develop branch already moved to hooks ^1.0.0 +
+# native_toolchain_c ^0.17.1, which is compatible — so pin to it (a specific
+# commit for reproducibility) until a fixed version is published to pub.dev.
+dependency_overrides:
+  thermion_dart:
+    git:
+      url: https://github.com/nmfisher/thermion.git
+      path: thermion_dart
+      ref: 3831559a866d6b92cdba9d6b06f7f0e21b9553ca
+  thermion_flutter:
+    git:
+      url: https://github.com/nmfisher/thermion.git
+      path: thermion_flutter/thermion_flutter
+      ref: 3831559a866d6b92cdba9d6b06f7f0e21b9553ca
+
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 
@@ -70,7 +98,6 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/3d-engine/viewer.html
     - assets/sample_models/
 
   # An image asset can refer to one or more resolution-specific "variants", see

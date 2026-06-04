@@ -49,6 +49,24 @@ subprojects {
                 logger.warn("Java 17 not set for ${project.name}: ${e.message}")
             }
         }
+        // Kotlin jvmTarget 17: some plugins (e.g. thermion_flutter) compile
+        // Kotlin at 1.8 while Java is 17 -> "Inconsistent JVM Target". Align the
+        // Kotlin compile tasks to 17 too. Reflection so the root build script
+        // needs no Kotlin Gradle plugin types on its classpath.
+        tasks.matching { it.javaClass.name.contains("KotlinCompile") }
+            .configureEach {
+                try {
+                    val kotlinOptions =
+                        this.javaClass.getMethod("getKotlinOptions").invoke(this)
+                    kotlinOptions.javaClass
+                        .getMethod("setJvmTarget", String::class.java)
+                        .invoke(kotlinOptions, "17")
+                } catch (e: Exception) {
+                    logger.warn(
+                        "Kotlin jvmTarget 17 not set for ${project.name}: ${e.message}",
+                    )
+                }
+            }
     }
 }
 

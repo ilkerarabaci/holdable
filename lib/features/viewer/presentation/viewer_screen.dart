@@ -1,20 +1,27 @@
-import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../../app/theme/prism_colors.dart';
 import '../../../app/theme/prism_gradient.dart';
 import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
+import '../data/gpu_support.dart';
+import '../data/native_stats.dart';
+import 'scene_view.dart';
 
-/// Interactive 3D viewer. Renders the model in a WebView running a bundled
-/// three.js scene (OBJ/STL loaders, OrbitControls). Model bytes are passed to
-/// JS as chunked base64 over a channel — no CORS, no local server.
+/// Interactive 3D viewer. Renders the model natively with Thermion (Google
+/// Filament) — see ADR-002; the prior flutter_scene line (ADR-001) was frozen
+/// over an Impeller GPU-memory floor. The render surface, orbit controls,
+/// render modes, preset cameras and thumbnail capture live in [ModelSceneView];
+/// this screen owns the surrounding chrome (toolbar, panels, prev/next nav).
 class ViewerScreen extends ConsumerStatefulWidget {
   const ViewerScreen({super.key, required this.model});
 
@@ -27,108 +34,73 @@ class ViewerScreen extends ConsumerStatefulWidget {
 enum _Tab { view, render, info }
 
 class _ViewerScreenState extends ConsumerState<ViewerScreen> {
-  late final WebViewController _controller;
+  final ModelSceneController _scene = ModelSceneController();
   late LibraryModel _model;
-  bool _ready = false;
   _Tab _tab = _Tab.view;
-  bool _loading = true;
-  String? _error;
-  int? _tris;
-  int? _verts;
-  int? _ms;
+  ModelSceneStatus _status = const ModelSceneStatus(loading: true);
+
+  /// null = still checking, false = device GPU can't run the native viewer.
+  bool? _gpuSupported;
+
+  /// Live PSS breakdown (KB) shown in the Info panel on non-release builds, so
+  /// memory can be read on-device without `adb dumpsys meminfo`.
+  Map<String, int>? _mem;
+  Timer? _pssTimer;
+
+  /// App version + build (e.g. "0.3.0+3"), shown in the Info panel so the build
+  /// under test is identifiable on-device.
+  String? _appVersion;
 
   @override
   void initState() {
     super.initState();
     _model = widget.model;
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..addJavaScriptChannel('ModelChannel', onMessageReceived: _onMessage)
-      ..loadFlutterAsset('assets/3d-engine/viewer.html');
-  }
-
-  Future<void> _onMessage(JavaScriptMessage message) async {
-    final raw = message.message;
-    if (raw == 'ready') {
-      _ready = true;
-      await _applyTheme();
-      await _sendModel();
-      return;
-    }
-    try {
-      final data = jsonDecode(raw) as Map<String, dynamic>;
-      if (!mounted) return;
-      if (data['type'] == 'loaded') {
-        setState(() {
-          _loading = false;
-          _tris = (data['tris'] as num?)?.toInt();
-          _verts = (data['verts'] as num?)?.toInt();
-          _ms = (data['ms'] as num?)?.toInt();
-        });
-      } else if (data['type'] == 'error') {
-        setState(() {
-          _loading = false;
-          _error = data['message'] as String? ?? 'Failed to render';
-        });
-      } else if (data['type'] == 'thumb') {
-        await _saveThumbnail(data['data'] as String);
+    GpuSupport.isSupported().then((ok) {
+      if (mounted) setState(() => _gpuSupported = ok);
+    });
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) {
+        setState(() => _appVersion = '${info.version}+${info.buildNumber}');
       }
-    } catch (_) {/* ignore non-JSON */}
-  }
-
-  Future<void> _applyTheme() async {
-    final mode =
-        Theme.of(context).brightness == Brightness.light ? 'light' : 'dark';
-    await _controller.runJavaScript("window.setTheme('$mode')");
-  }
-
-  Future<void> _sendModel() async {
-    try {
-      final bytes = await File(_model.filePath).readAsBytes();
-      final b64 = base64Encode(bytes);
-      // Send in 256KB chunks — a single arg this large trips Android's binder
-      // limit (TransactionTooLargeException) on big models. base64 is quote/
-      // backslash-free, so it embeds safely in a single-quoted JS literal.
-      const chunkSize = 256 * 1024;
-      for (var i = 0; i < b64.length; i += chunkSize) {
-        final end = (i + chunkSize < b64.length) ? i + chunkSize : b64.length;
-        await _controller
-            .runJavaScript("window.appendChunk('${b64.substring(i, end)}')");
-      }
-      await _controller.runJavaScript("window.loadChunked('${_model.format.name}')");
-    } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+    });
+    if (!kReleaseMode) {
+      _pssTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+        final v = await NativeStats.memStats();
+        if (mounted && v != null) setState(() => _mem = v);
+      });
     }
   }
 
-  /// Persists the base64 PNG thumbnail captured by the viewer.
-  Future<void> _saveThumbnail(String b64) async {
+  @override
+  void dispose() {
+    _pssTimer?.cancel();
+    super.dispose();
+  }
+
+  void _onStatus(ModelSceneStatus status) {
+    if (mounted) setState(() => _status = status);
+  }
+
+  /// Persists the PNG thumbnail captured by the scene view.
+  Future<void> _saveThumbnail(Uint8List bytes) async {
     try {
       final docs = await getApplicationDocumentsDirectory();
       final thumbsDir = Directory('${docs.path}/thumbs');
       if (!thumbsDir.existsSync()) thumbsDir.createSync(recursive: true);
       final path = '${thumbsDir.path}/${_model.id}.png';
-      await File(path).writeAsBytes(base64Decode(b64));
+      await File(path).writeAsBytes(bytes);
       await ref
           .read(libraryControllerProvider.notifier)
           .setThumbnail(_model.id, path);
     } catch (_) {/* best-effort */}
   }
 
-  void _setMode(String mode) =>
-      _controller.runJavaScript("window.setRenderMode('$mode')");
-  void _setView(String which) =>
-      _controller.runJavaScript("window.setView('$which')");
-
-  /// Loads a different model into the existing WebView (prev/next nav).
+  /// Loads a different model into the existing scene (prev/next nav).
   void _goTo(LibraryModel m) {
     setState(() {
       _model = m;
-      _loading = true;
-      _error = null;
-      _tris = _verts = _ms = null;
+      _status = const ModelSceneStatus(loading: true);
     });
-    if (_ready) _sendModel();
   }
 
   @override
@@ -161,12 +133,25 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
           const SizedBox(width: 4),
         ],
       ),
-      body: Stack(
+      body: _gpuSupported == null
+          ? const Center(child: CircularProgressIndicator())
+          : _gpuSupported == false
+              ? const _UnsupportedGpu()
+              : Stack(
         children: [
-          Positioned.fill(child: WebViewWidget(controller: _controller)),
-          if (_loading && _error == null)
+          Positioned.fill(
+            child: ModelSceneView(
+              controller: _scene,
+              filePath: _model.filePath,
+              format: _model.format.name,
+              background: c.bg,
+              onStatus: _onStatus,
+              onThumbnail: _saveThumbnail,
+            ),
+          ),
+          if (_status.loading && _status.error == null)
             const Center(child: CircularProgressIndicator()),
-          if (_error != null)
+          if (_status.error != null)
             Center(
               child: Padding(
                 padding: const EdgeInsets.all(32),
@@ -176,18 +161,72 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
               ),
             ),
           if (_tab == _Tab.view)
-            Positioned(left: 0, right: 0, bottom: 0, child: _PresetPanel(onView: _setView)),
+            Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _PresetPanel(onView: _scene.setView)),
           if (_tab == _Tab.render)
-            Positioned(left: 0, right: 0, bottom: 0, child: _RenderPanel(onMode: _setMode)),
+            Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _RenderPanel(
+                  onMode: _scene.setRenderMode,
+                  onColor: _scene.setColor,
+                )),
           if (_tab == _Tab.info)
-            Positioned(left: 0, right: 0, bottom: 0, child: _InfoPanel(
-              model: _model, tris: _tris, verts: _verts, ms: _ms,
-            )),
+            Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _InfoPanel(
+                  model: _model,
+                  tris: _status.tris,
+                  verts: _status.verts,
+                  ms: _status.parseMs,
+                  mem: _mem,
+                  appVersion: _appVersion,
+                )),
         ],
       ),
       bottomNavigationBar: _Toolbar(
         current: _tab,
         onSelect: (t) => setState(() => _tab = t),
+      ),
+    );
+  }
+}
+
+/// Shown when the device's GPU can't run the native renderer (no Vulkan on
+/// Android; flutter_scene crashes on the GLES backend).
+class _UnsupportedGpu extends StatelessWidget {
+  const _UnsupportedGpu();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.prism;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(LucideIcons.triangleAlert, size: 40, color: c.textMuted),
+            const SizedBox(height: 16),
+            Text(
+              "This device's GPU isn't supported yet.",
+              style: TextStyle(color: c.textPrimary, fontSize: 16),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'The 3D viewer needs a Vulkan-capable GPU.',
+              style: TextStyle(color: c.textMuted),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -335,37 +374,114 @@ class _PresetPanel extends StatelessWidget {
 }
 
 class _RenderPanel extends StatelessWidget {
-  const _RenderPanel({required this.onMode});
+  const _RenderPanel({required this.onMode, required this.onColor});
   final ValueChanged<String> onMode;
+  final ValueChanged<Color> onColor;
+
+  // Neutral default plus the three Prism accents (the only sanctioned colors).
+  static const Color _neutral = Color(0xFFD1D1DB);
+
   @override
   Widget build(BuildContext context) {
+    final c = context.prism;
     return _Panel(
       label: 'RENDER',
-      child: Wrap(spacing: 10, children: [
-        _Chip(label: 'Solid', onTap: () => onMode('solid')),
-        _Chip(label: 'Wireframe', onTap: () => onMode('wireframe')),
-        _Chip(label: 'X-ray', onTap: () => onMode('xray')),
-      ]),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(spacing: 10, children: [
+            _Chip(label: 'Solid', onTap: () => onMode('solid')),
+            _Chip(label: 'Wireframe', onTap: () => onMode('wireframe')),
+            _Chip(label: 'X-ray', onTap: () => onMode('xray')),
+          ]),
+          const SizedBox(height: 14),
+          Text('COLOR',
+              style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  letterSpacing: 1,
+                  color: c.textMuted)),
+          const SizedBox(height: 10),
+          Row(children: [
+            for (final color in const [
+              _neutral,
+              PrismGradient.pink,
+              PrismGradient.violet,
+              PrismGradient.cyan,
+            ])
+              _Swatch(color: color, onTap: () => onColor(color)),
+          ]),
+        ],
+      ),
+    );
+  }
+}
+
+class _Swatch extends StatelessWidget {
+  const _Swatch({required this.color, required this.onTap});
+  final Color color;
+  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) {
+    final c = context.prism;
+    return Padding(
+      padding: const EdgeInsets.only(right: 12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(999),
+        child: Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            border: Border.all(color: c.borderHairline),
+          ),
+        ),
+      ),
     );
   }
 }
 
 class _InfoPanel extends StatelessWidget {
-  const _InfoPanel({required this.model, this.tris, this.verts, this.ms});
+  const _InfoPanel({
+    required this.model,
+    this.tris,
+    this.verts,
+    this.ms,
+    this.mem,
+    this.appVersion,
+  });
   final LibraryModel model;
   final int? tris;
   final int? verts;
   final int? ms;
+  final Map<String, int>? mem;
+  final String? appVersion;
 
   @override
   Widget build(BuildContext context) {
     final c = context.prism;
     String n(int? v) => v == null ? '—' : v.toString();
+    String mb(String k) {
+      final kb = mem?[k];
+      return kb == null ? '—' : '${(kb / 1024).round()} MB';
+    }
+
     final rows = <List<String>>[
       ['FORMAT', model.format.label],
       ['VERTICES', n(verts)],
       ['TRIANGLES', n(tris)],
       ['PARSE', ms == null ? '—' : '${ms}ms'],
+      if (mem != null) ...[
+        ['MEMORY (PSS)', mb('total')],
+        ['• GRAPHICS', mb('graphics')],
+        ['• NATIVE', mb('native')],
+        ['• DART', mb('java')],
+        ['• CODE', mb('code')],
+      ],
+      ['APP', appVersion ?? '—'],
     ];
     return _Panel(
       label: 'INFO',

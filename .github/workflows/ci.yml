@@ -21,6 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      # Thermion's native build hook compiles its C++ for the host during
+      # `flutter test`; provide a C++ stdlib so it can find <chrono> etc.
+      - name: Install C++ toolchain (Thermion native build)
+        run: sudo apt-get update && sudo apt-get install -y clang g++ libc++-dev libc++abi-dev libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev libgbm-dev libdrm-dev
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -36,6 +40,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Install C++ toolchain (Thermion native build)
+        run: sudo apt-get update && sudo apt-get install -y clang g++ libc++-dev libc++abi-dev libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev libgbm-dev libdrm-dev
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
