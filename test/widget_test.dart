@@ -215,15 +215,18 @@ void main() {
     expect(bytesToHuman(52428800), '50.0 MB');
   });
 
-  test('share intent keeps only .obj/.stl paths', () {
+  test('share intent keeps .obj/.stl models and images (for Image → 3D)', () {
     final kept = ImportService.supportedPaths([
       '/in/cube.obj',
       '/in/bracket.STL',
       '/in/notes.pdf',
       '/in/scene.blend',
       '/in/photo.png',
+      '/in/logo.jpg',
     ]);
-    expect(kept, ['/in/cube.obj', '/in/bracket.STL']);
+    // Models pass through as-is; images are accepted and routed to the heightmap
+    // relief path. Unsupported files (.pdf/.blend) are dropped.
+    expect(kept, ['/in/cube.obj', '/in/bracket.STL', '/in/photo.png', '/in/logo.jpg']);
   });
 
   test('sample catalog is non-empty and all .stl/.obj', () {
