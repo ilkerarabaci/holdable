@@ -4,9 +4,8 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
-// Hide Flutter's View/Texture so Thermion's same-named types resolve (we use the
-// Thermion ones for the offscreen thumbnail render target; we don't use Flutter's
-// View/Texture widgets in this file).
+// Hide Flutter's View/Texture so Thermion's same-named types resolve without a
+// name clash (we don't use Flutter's View/Texture widgets in this file).
 import 'package:flutter/widgets.dart' hide View, Texture;
 // Thermion re-exports thermion_dart (ThermionFlutterPlugin, ThermionViewer,
 // Geometry, FilamentApp, DirectLight, Camera, View, RenderTarget, the
@@ -15,6 +14,7 @@ import 'package:flutter/widgets.dart' hide View, Texture;
 import 'package:thermion_flutter/thermion_flutter.dart' hide Material;
 
 import '../data/model_parser.dart';
+import '../data/thumbnail_raster.dart';
 
 /// Status pushed up to the host screen (drives the loading spinner + Info panel).
 class ModelSceneStatus {
@@ -108,18 +108,13 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   bool _viewerReady = false;
   bool _hasModel = false;
   bool _thumbCaptured = false; // one thumbnail per model load
-  // Thumbnails are captured from a SEPARATE offscreen View + RenderTarget, never
-  // the live on-screen view — a live-view capture on the load path destabilized
-  // the app (alpha.4). The offscreen render is a one-shot and can't stall the
-  // interactive render loop.
-  // DISABLED again: even the offscreen-View capture crashes the app on device
-  // (Thermion 0.3.4 `capture` on Android is unstable here, on-screen OR
-  // offscreen). Thumbnails need a different approach — investigate separately.
-  // Capture code retained behind the flag for that follow-up.
-  static final bool _thumbnailEnabled = false;
-  View? _thumbView; // owns the offscreen render target natively
-  Camera? _thumbCamera;
-  static const int _thumbRtSize = 512; // square offscreen render-target size
+  // Library thumbnails are rasterized on the CPU (see thumbnail_raster.dart),
+  // NOT via Thermion's GPU capture() — that crashed the app on device (both the
+  // live swapchain AND a dedicated offscreen View+RenderTarget; alpha.4/alpha.6,
+  // Samsung Device Care flagged "holdable sıklıkla çöküyor"). The CPU path runs
+  // in the parse isolate, never touches Filament's render thread, so it can't
+  // stall or crash rendering. Output is encoded to PNG on the UI isolate below.
+  static const int _thumbSize = 256; // square thumbnail edge, px
 
   String _mode = 'solid';
   Color _baseColor = _kNeutral;
@@ -167,12 +162,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   void dispose() {
     widget.controller._detach(this);
     final viewer = _viewer;
-    final thumbView = _thumbView;
     _viewer = null;
-    _thumbView = null;
-    _thumbCamera = null;
-    // Best-effort: free the offscreen view before tearing down the viewer.
-    if (thumbView != null) FilamentApp.instance?.destroyView(thumbView);
     viewer?.dispose();
     super.dispose();
   }
@@ -226,18 +216,36 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     try {
       final prepared = await compute(
         _prepareModelEntry,
-        _ParseRequest(widget.filePath, widget.format),
+        _ParseRequest(
+          widget.filePath,
+          widget.format,
+          thumbSize: _thumbSize,
+          thumbAzimuth: _isoAzimuth,
+          thumbElevation: _isoElevation,
+          thumbBgColor: _argb(widget.background),
+          thumbSurfaceColor: _argb(_baseColor),
+        ),
       );
       if (!mounted) return;
       _model = prepared;
       _lineIndices = null; // invalidate the previous model's wireframe cache
       _thumbCaptured = false;
       if (_viewerReady) await _applyMode(_mode, frame: true);
+      // Thumbnail was rasterized off-isolate alongside the parse (CPU, no GPU).
+      // Encode it to PNG on the UI isolate and hand it to the host to persist.
+      await _maybeEmitThumbnail(prepared);
     } catch (e) {
       if (!mounted) return;
       widget.onStatus(ModelSceneStatus(loading: false, error: '$e'));
     }
   }
+
+  /// ARGB int (0xAARRGGBB) for a [Color], via its 0..1 component channels.
+  static int _argb(Color c) =>
+      ((c.a * 255).round() << 24) |
+      ((c.r * 255).round() << 16) |
+      ((c.g * 255).round() << 8) |
+      (c.b * 255).round();
 
   /// Builds (or rebuilds) the on-screen asset for [mode], optionally framing the
   /// camera to it (on first load / model change). Coalesces rapid mode taps.
@@ -336,17 +344,8 @@ class _ModelSceneViewState extends State<ModelSceneView> {
           tris: p.triangleCount,
           parseMs: p.parseMs,
         ));
-        // Grab a library thumbnail once the (solid) model is framed.
-        // DISABLED: capturing the live on-screen view at load time (heavy GPU
-        // readback + full-screen buffer copy + PNG decode while the render loop
-        // is active) destabilized the app on device. Revisit with an offscreen
-        // render target / on-demand capture so it can't stall the load path.
-        if (_thumbnailEnabled &&
-            mode == 'solid' &&
-            !_thumbCaptured &&
-            widget.onThumbnail != null) {
-          _scheduleThumbnail();
-        }
+        // The library thumbnail is rasterized on the CPU off the load path (see
+        // _load → _maybeEmitThumbnail), not captured from the GPU view here.
       }
     } catch (e) {
       if (mounted) widget.onStatus(ModelSceneStatus(loading: false, error: '$e'));
@@ -497,88 +496,30 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     _applyMode(mode);
   }
 
-  // --- Thumbnail capture ----------------------------------------------------
+  // --- Thumbnail (CPU rasterized, no GPU) -----------------------------------
 
-  /// Captures a library thumbnail shortly after the model is framed (a small
-  /// delay lets the first frame settle on the GPU).
-  void _scheduleThumbnail() {
-    _thumbCaptured = true;
-    // Wait well past load so the offscreen capture runs only when things are
-    // idle (it's offscreen anyway, but this keeps the load path clean).
-    Future.delayed(const Duration(milliseconds: 900), () {
-      if (mounted) _captureThumbnail();
-    });
-  }
-
-  Future<void> _captureThumbnail() async {
-    final viewer = _viewer;
+  /// Encodes the CPU-rasterized RGBA thumbnail (built in the parse isolate) to a
+  /// PNG on the UI isolate and hands it to the host to persist. One per load.
+  Future<void> _maybeEmitThumbnail(_PreparedModel p) async {
     final cb = widget.onThumbnail;
-    final app = FilamentApp.instance;
-    if (viewer == null || cb == null || app == null) return;
-    try {
-      // Lazily build a dedicated offscreen view + square render target the first
-      // time. It shares the live scene (model + lights) but renders through its
-      // own camera into its own target, so capturing it never touches the
-      // on-screen swapchain or the interactive render loop.
-      var thumbView = _thumbView;
-      if (thumbView == null) {
-        final rt = await app.createRenderTarget(_thumbRtSize, _thumbRtSize);
-        thumbView = await app.createView();
-        await thumbView.setRenderTarget(rt);
-        await thumbView.setViewport(_thumbRtSize, _thumbRtSize);
-        final cam = await app.createCamera();
-        _thumbView = thumbView;
-        _thumbCamera = cam;
-      }
-      final cam = _thumbCamera!;
-      await thumbView.setScene(await viewer.view.getScene());
-      await thumbView.setCamera(cam);
-
-      // Frame the model from a fixed iso angle into the square target.
-      final r = _radius;
-      final ce = math.cos(_isoElevation);
-      final pos = _target +
-          Vector3(r * ce * math.sin(_isoAzimuth), r * math.sin(_isoElevation),
-              r * ce * math.cos(_isoAzimuth));
-      await cam.setProjectionFromVerticalFieldOfView(
-          45.0, 1.0, math.max(0.01, r * 0.02), r * 20.0);
-      await cam.lookAt(pos, focus: _target, up: Vector3(0, 1, 0));
-
-      final caps = await app.capture(
-        null,
-        view: thumbView,
-        captureRenderTarget: true,
-        pixelDataFormat: PixelDataFormat.RGBA,
-        pixelDataType: PixelDataType.UBYTE,
-      );
-      if (caps.isEmpty) return;
-      final png = await _encodeThumb(caps.first.$2, _thumbRtSize, _thumbRtSize);
-      if (png != null && mounted) cb(png);
-    } catch (_) {
-      _thumbCaptured = false; // let a later load retry
-    }
+    final rgba = p.thumbnailRgba;
+    if (cb == null || rgba == null || _thumbCaptured) return;
+    _thumbCaptured = true;
+    final png = await _encodePng(rgba, p.thumbSize);
+    if (png != null && mounted) cb(png);
   }
 
-  /// Flips the bottom-up GL pixel buffer, downscales to 256px wide, PNG-encodes.
-  Future<Uint8List?> _encodeThumb(Uint8List rgba, int w, int h) async {
-    if (w <= 0 || h <= 0 || rgba.length < w * h * 4) return null;
-    final rowBytes = w * 4;
-    final flipped = Uint8List(rgba.length);
-    for (var y = 0; y < h; y++) {
-      flipped.setRange(
-          y * rowBytes, y * rowBytes + rowBytes, rgba, (h - 1 - y) * rowBytes);
-    }
-    const target = 256;
-    final th = math.max(1, (target * h / w).round());
+  /// RGBA8888 byte buffer (top-down, [size]×[size]) → PNG bytes. No flip — the
+  /// software rasterizer already writes rows top-to-bottom.
+  Future<Uint8List?> _encodePng(Uint8List rgba, int size) async {
+    if (size <= 0 || rgba.length < size * size * 4) return null;
     final completer = Completer<ui.Image>();
     ui.decodeImageFromPixels(
-      flipped,
-      w,
-      h,
+      rgba,
+      size,
+      size,
       ui.PixelFormat.rgba8888,
       completer.complete,
-      targetWidth: target,
-      targetHeight: th,
     );
     final img = await completer.future;
     final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
@@ -610,9 +551,22 @@ class _ModelSceneViewState extends State<ModelSceneView> {
 // -----------------------------------------------------------------------------
 
 class _ParseRequest {
-  const _ParseRequest(this.path, this.format);
+  const _ParseRequest(
+    this.path,
+    this.format, {
+    required this.thumbSize,
+    required this.thumbAzimuth,
+    required this.thumbElevation,
+    required this.thumbBgColor,
+    required this.thumbSurfaceColor,
+  });
   final String path;
   final String format;
+  final int thumbSize; // square thumbnail edge in px (0 disables)
+  final double thumbAzimuth;
+  final double thumbElevation;
+  final int thumbBgColor; // 0xAARRGGBB
+  final int thumbSurfaceColor; // 0xAARRGGBB (alpha ignored)
 }
 
 /// Parsed model, de-interleaved into Filament's separate attribute buffers.
@@ -630,6 +584,8 @@ class _PreparedModel {
     required this.centerZ,
     required this.camDistance,
     required this.parseMs,
+    this.thumbnailRgba,
+    this.thumbSize = 0,
   });
 
   final Float32List positions; // 3 floats / vertex
@@ -642,6 +598,11 @@ class _PreparedModel {
   final double centerX, centerY, centerZ;
   final double camDistance;
   final int parseMs;
+
+  /// CPU-rasterized library thumbnail, RGBA8888, [thumbSize]²·4 bytes (top-down),
+  /// or null if rasterization was skipped/failed. Encoded to PNG on the UI thread.
+  final Uint8List? thumbnailRgba;
+  final int thumbSize;
 }
 
 /// Isolate entry: read + parse, then split the interleaved buffer into the
@@ -698,6 +659,32 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
       math.sqrt(b.sizeX * b.sizeX + b.sizeY * b.sizeY + b.sizeZ * b.sizeZ);
   final camDistance = radius <= 0 ? 5.0 : radius * 3.0;
 
+  // Rasterize the library thumbnail here in the parse isolate (CPU only — never
+  // touches Filament's GPU render thread, which is why Thermion's capture()
+  // crashed on device). Only the small RGBA buffer crosses back to the UI thread.
+  Uint8List? thumb;
+  if (req.thumbSize > 0) {
+    thumb = rasterizeThumbnail(
+      positions: positions,
+      indices: indices,
+      triangleCount: mesh.triangleCount,
+      centerX: b.centerX,
+      centerY: b.centerY,
+      centerZ: b.centerZ,
+      minX: b.minX,
+      minY: b.minY,
+      minZ: b.minZ,
+      maxX: b.maxX,
+      maxY: b.maxY,
+      maxZ: b.maxZ,
+      azimuth: req.thumbAzimuth,
+      elevation: req.thumbElevation,
+      size: req.thumbSize,
+      bgColor: req.thumbBgColor,
+      surfaceColor: req.thumbSurfaceColor,
+    );
+  }
+
   return _PreparedModel(
     positions: positions,
     normals: normals,
@@ -711,5 +698,7 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
     centerZ: b.centerZ,
     camDistance: camDistance,
     parseMs: sw.elapsedMilliseconds,
+    thumbnailRgba: thumb,
+    thumbSize: req.thumbSize,
   );
 }
