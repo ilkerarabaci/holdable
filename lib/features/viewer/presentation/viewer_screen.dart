@@ -15,6 +15,7 @@ import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
 import '../data/gpu_support.dart';
 import '../data/native_stats.dart';
+import '../data/thumbnail_service.dart' show kThumbnailVersionSuffix;
 import 'scene_view.dart';
 
 /// Interactive 3D viewer. Renders the model natively with Thermion (Google
@@ -87,7 +88,9 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       final docs = await getApplicationDocumentsDirectory();
       final thumbsDir = Directory('${docs.path}/thumbs');
       if (!thumbsDir.existsSync()) thumbsDir.createSync(recursive: true);
-      final path = '${thumbsDir.path}/${_model.id}.png';
+      // Version-stamped name so the library can tell fresh CPU thumbnails from
+      // stale ones left by older (Thermion GPU-capture) builds.
+      final path = '${thumbsDir.path}/${_model.id}$kThumbnailVersionSuffix';
       await File(path).writeAsBytes(bytes);
       await ref
           .read(libraryControllerProvider.notifier)

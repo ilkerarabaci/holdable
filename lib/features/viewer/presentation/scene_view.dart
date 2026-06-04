@@ -179,9 +179,12 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         widget.background.b,
         1.0,
       );
-      // No IBL/skybox is bundled, so lighting is entirely direct. A single sun
-      // leaves the far side pure black; a key + fill + rim trio approximates
-      // ambient so the whole model reads.
+      // No IBL/skybox is bundled, so lighting is entirely direct. With only a
+      // key + fill + rim trio, a low-poly model (e.g. the 8-face octahedron) can
+      // still have facets that face away from every light → pure black. Surround
+      // the model with six suns (the key/fill/rim plus three dim counter-lights
+      // roughly opposite them) so every facet picks up some light — a poor-man's
+      // ambient that kills the half-black look without an IBL.
       await viewer.addDirectLight(DirectLight.sun(
         direction: Vector3(0.3, -0.8, 0.5)..normalize(),
         intensity: 70000,
@@ -195,6 +198,22 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       await viewer.addDirectLight(DirectLight.sun(
         direction: Vector3(0.1, 0.9, -0.3)..normalize(),
         intensity: 22000,
+        castShadows: false,
+      ));
+      // Counter-lights (opposite the trio) to fill the shadowed facets.
+      await viewer.addDirectLight(DirectLight.sun(
+        direction: Vector3(-0.3, 0.8, -0.5)..normalize(),
+        intensity: 26000,
+        castShadows: false,
+      ));
+      await viewer.addDirectLight(DirectLight.sun(
+        direction: Vector3(0.6, 0.2, 0.5)..normalize(),
+        intensity: 18000,
+        castShadows: false,
+      ));
+      await viewer.addDirectLight(DirectLight.sun(
+        direction: Vector3(-0.1, -0.9, 0.3)..normalize(),
+        intensity: 14000,
         castShadows: false,
       ));
       final camera = await viewer.getActiveCamera();

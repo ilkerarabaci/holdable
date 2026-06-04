@@ -9,7 +9,7 @@ import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
 
 /// Outcome of an import attempt, surfaced to the UI for feedback.
-enum ImportStatus { added, cancelled, unsupported, error }
+enum ImportStatus { added, cancelled, unsupported, duplicate, error }
 
 class ImportResult {
   const ImportResult(this.status, {this.model, this.message});
@@ -74,6 +74,15 @@ class ImportService {
     }
     try {
       final source = File(path);
+      final name =
+          _baseName(displayName ?? path.split(Platform.pathSeparator).last);
+      final resolvedSize = size ?? source.lengthSync();
+      // Skip re-importing a model already in the wallet (same name+size+format).
+      // Checked before copying so we don't leave an orphaned file.
+      if (_isDuplicate(name, resolvedSize, format)) {
+        return ImportResult(ImportStatus.duplicate,
+            message: '"$name" is already in your library.');
+      }
       final docs = await getApplicationDocumentsDirectory();
       final modelsDir = Directory('${docs.path}/models');
       if (!modelsDir.existsSync()) modelsDir.createSync(recursive: true);
@@ -85,9 +94,9 @@ class ImportService {
 
       final model = LibraryModel(
         id: id,
-        name: _baseName(displayName ?? path.split(Platform.pathSeparator).last),
+        name: name,
         format: format,
-        sizeBytes: size ?? source.lengthSync(),
+        sizeBytes: resolvedSize,
         filePath: dest,
         importedAt: now,
       );
@@ -106,6 +115,10 @@ class ImportService {
     try {
       final data = await rootBundle.load(assetPath);
       final bytes = data.buffer.asUint8List();
+      if (_isDuplicate(displayName, bytes.length, format)) {
+        return ImportResult(ImportStatus.duplicate,
+            message: '"$displayName" is already in your library.');
+      }
       final docs = await getApplicationDocumentsDirectory();
       final modelsDir = Directory('${docs.path}/models');
       if (!modelsDir.existsSync()) modelsDir.createSync(recursive: true);
@@ -128,6 +141,15 @@ class ImportService {
     } catch (e) {
       return ImportResult(ImportStatus.error, message: '$e');
     }
+  }
+
+  /// True if a model with the same display name, byte size and format is already
+  /// in the wallet — the practical signal for an exact re-import (each import
+  /// gets a fresh id + copied file, so paths never match).
+  bool _isDuplicate(String name, int sizeBytes, ModelFormat format) {
+    final existing = ref.read(libraryControllerProvider);
+    return existing.any((m) =>
+        m.name == name && m.sizeBytes == sizeBytes && m.format == format);
   }
 
   static String _ext(String path) {

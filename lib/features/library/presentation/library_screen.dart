@@ -47,6 +47,10 @@ Future<void> _pickSample(BuildContext context, WidgetRef ref) async {
   if (result.status == ImportStatus.added) {
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text('Added "${result.model!.name}"')));
+  } else if (result.status == ImportStatus.duplicate) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(result.message ?? 'Already in your library')),
+    );
   }
 }
 
@@ -65,6 +69,10 @@ Future<void> _runImport(BuildContext context, WidgetRef ref) async {
       );
     case ImportStatus.cancelled:
       break;
+    case ImportStatus.duplicate:
+      messenger.showSnackBar(
+        SnackBar(content: Text(result.message ?? 'Already in your library')),
+      );
     case ImportStatus.unsupported:
     case ImportStatus.error:
       messenger.showSnackBar(
