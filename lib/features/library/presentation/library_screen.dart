@@ -84,6 +84,30 @@ Future<void> _runImport(BuildContext context, WidgetRef ref) async {
   }
 }
 
+/// Picks an image and builds a 3D heightmap relief from it (roadmap tier A).
+Future<void> _runImageImport(BuildContext context, WidgetRef ref) async {
+  final result = await ref.read(importServiceProvider).pickImageAndImport();
+  if (!context.mounted) return;
+  final messenger = ScaffoldMessenger.of(context);
+  switch (result.status) {
+    case ImportStatus.added:
+      messenger.showSnackBar(
+        SnackBar(content: Text('Built "${result.model!.name}" from your image')),
+      );
+    case ImportStatus.cancelled:
+      break;
+    case ImportStatus.duplicate:
+      messenger.showSnackBar(
+        SnackBar(content: Text(result.message ?? 'Already in your library')),
+      );
+    case ImportStatus.unsupported:
+    case ImportStatus.error:
+      messenger.showSnackBar(
+        SnackBar(content: Text(result.message ?? "Couldn't build a 3D model")),
+      );
+  }
+}
+
 /// Prism-voice confirmation for a file past the soft size cap
 /// ([kMaxImportBytes]). Returns true if the user chooses to load it anyway.
 Future<bool> _confirmOversize(BuildContext context, int sizeBytes) async {
@@ -147,6 +171,7 @@ class LibraryScreen extends ConsumerWidget {
           context,
           onPickFiles: () => _runImport(context, ref),
           onPickSamples: () => _pickSample(context, ref),
+          onPickImage: () => _runImageImport(context, ref),
         ),
         child: const Icon(LucideIcons.plus),
       ),
