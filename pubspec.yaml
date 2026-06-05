@@ -58,6 +58,10 @@ dependencies:
   thermion_flutter: ^0.3.4
   # Vector/matrix math for the camera + transforms (also a thermion dep).
   vector_math: ^2.1.4
+  # AR-1 spike (ADR-003): surface placement via ARCore (Android) / ARKit (iOS).
+  # Maintained fork of ar_flutter_plugin (SceneView/Filament). Evaluating whether
+  # it builds alongside the thermion native stack + the file_picker 8.1.0 pin.
+  ar_flutter_plugin_2: ^0.0.3
 dev_dependencies:
   flutter_test:
     sdk: flutter
