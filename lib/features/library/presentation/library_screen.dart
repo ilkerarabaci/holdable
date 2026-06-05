@@ -257,38 +257,53 @@ class _ModelGrid extends ConsumerWidget {
   }
 
   /// Shares the model's file out to other apps via the system share sheet.
-  /// Uses a friendly `<name>.<ext>` filename even though the file on disk is
-  /// stored as `<id>.<ext>`.
+  ///
+  /// DIAGNOSTIC build: the share sheet wasn't opening on the S26 Ultra (Android
+  /// 16) and the brief error snackbar was easy to miss, so every outcome is
+  /// surfaced in a modal dialog — success returns the [ShareResult] status,
+  /// failure shows the full exception + stack. Strip back to a quiet path once
+  /// the root cause is known.
   Future<void> _shareModel(BuildContext context, LibraryModel model) async {
-    final messenger = ScaffoldMessenger.of(context);
-    if (!File(model.filePath).existsSync()) {
-      messenger.showSnackBar(
-        const SnackBar(content: Text("That model's file is missing.")),
-      );
-      return;
-    }
-    final fileName = '${model.name}.${model.format.name}';
-    // iPad needs the originating rect for the share popover; harmless elsewhere.
-    final box = context.findRenderObject() as RenderBox?;
-    final origin = box != null
-        ? box.localToGlobal(Offset.zero) & box.size
-        : null;
+    Future<void> report(String title, String body) => showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: Text(title),
+            content: SingleChildScrollView(child: Text(body)),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+
     try {
-      await Share.shareXFiles(
-        [
-          // Explicit MIME — .obj/.stl have no registered type, so without this
-          // the receiving app gets an empty type and many silently reject it
-          // (the share sheet appears but "Share" does nothing).
-          XFile(model.filePath,
-              name: fileName, mimeType: 'application/octet-stream'),
-        ],
-        subject: model.name,
-        fileNameOverrides: [fileName],
+      final file = File(model.filePath);
+      final exists = file.existsSync();
+      final size = exists ? file.lengthSync() : -1;
+      if (!exists) {
+        await report('Share debug', 'File MISSING:\n${model.filePath}');
+        return;
+      }
+      final box = context.findRenderObject() as RenderBox?;
+      final origin =
+          box != null ? box.localToGlobal(Offset.zero) & box.size : null;
+      final result = await Share.shareXFiles(
+        [XFile(model.filePath, mimeType: 'application/octet-stream')],
         sharePositionOrigin: origin,
       );
-    } catch (e) {
-      messenger.showSnackBar(
-        SnackBar(content: Text("Couldn't share: $e")),
+      await report(
+        'Share debug',
+        'Reached native OK.\n'
+            'path=${model.filePath}\n'
+            'size=$size bytes\n'
+            'result=${result.status}',
+      );
+    } catch (e, st) {
+      await report(
+        'Share FAILED',
+        '$e\n\n${st.toString().split('\n').take(8).join('\n')}',
       );
     }
   }
