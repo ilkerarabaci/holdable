@@ -2,8 +2,9 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'gltf_parser.dart';
+import 'ply_parser.dart';
 
-/// Parsing of `.obj` / `.stl` / `.glb` / `.gltf` model files into mesh data.
+/// Parsing of `.obj` / `.stl` / `.glb` / `.gltf` / `.ply` model files into mesh data.
 ///
 /// This layer is deliberately **pure Dart** — it has no dependency on
 /// flutter_scene or flutter_gpu — so the heavy parsing logic is unit-testable
@@ -98,10 +99,12 @@ class ModelParser {
       case 'glb':
       case 'gltf':
         return GltfParser.parse(bytes);
+      case 'ply':
+        return PlyParser.parse(bytes);
       default:
         throw ModelParseException(
           'Unsupported format ${fmt ?? '(unknown)'} — '
-          'expected obj, stl, glb or gltf',
+          'expected obj, stl, glb, gltf or ply',
         );
     }
   }
