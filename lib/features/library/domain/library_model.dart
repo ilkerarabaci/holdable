@@ -1,9 +1,11 @@
 import 'package:flutter/foundation.dart';
 
-/// Supported alpha formats. `.blend` is intentionally absent (v1.0).
+/// Supported model formats. `.blend` is intentionally absent (v1.0).
 enum ModelFormat {
   obj,
-  stl;
+  stl,
+  glb,
+  gltf;
 
   String get label => '.${name.toUpperCase()}';
 
@@ -12,6 +14,8 @@ enum ModelFormat {
     return switch (e) {
       'obj' => ModelFormat.obj,
       'stl' => ModelFormat.stl,
+      'glb' => ModelFormat.glb,
+      'gltf' => ModelFormat.gltf,
       _ => null,
     };
   }

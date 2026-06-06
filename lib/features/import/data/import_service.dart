@@ -70,7 +70,7 @@ class ImportService {
     final format = ModelFormat.fromExtension(_ext(path));
     if (format == null) {
       return const ImportResult(ImportStatus.unsupported,
-          message: 'Only .obj and .stl are supported in this version.');
+          message: 'Supported formats: .obj, .stl, .glb, .gltf');
     }
     try {
       final source = File(path);

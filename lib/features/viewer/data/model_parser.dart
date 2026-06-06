@@ -1,7 +1,9 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-/// Parsing of `.obj` / `.stl` model files into raw GPU-ready mesh data.
+import 'gltf_parser.dart';
+
+/// Parsing of `.obj` / `.stl` / `.glb` / `.gltf` model files into mesh data.
 ///
 /// This layer is deliberately **pure Dart** — it has no dependency on
 /// flutter_scene or flutter_gpu — so the heavy parsing logic is unit-testable
@@ -93,9 +95,13 @@ class ModelParser {
         return parseObj(bytes);
       case 'stl':
         return parseStl(bytes);
+      case 'glb':
+      case 'gltf':
+        return GltfParser.parse(bytes);
       default:
         throw ModelParseException(
-          'Unsupported format ${fmt ?? '(unknown)'} — expected obj or stl',
+          'Unsupported format ${fmt ?? '(unknown)'} — '
+          'expected obj, stl, glb or gltf',
         );
     }
   }
