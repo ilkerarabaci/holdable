@@ -22,6 +22,20 @@ class GltfParser {
   static const int _chunkBin = 0x004E4942; // 'BIN\0'
 
   static MeshData parse(Uint8List bytes) {
+    if (bytes.isEmpty) {
+      throw ModelParseException('Empty glTF/GLB file.');
+    }
+    try {
+      return _parse(bytes);
+    } on ModelParseException {
+      rethrow;
+    } catch (e) {
+      // A malformed file surfaces a clean error, not a raw FormatException/etc.
+      throw ModelParseException('Could not read this glTF/GLB ($e).');
+    }
+  }
+
+  static MeshData _parse(Uint8List bytes) {
     final (Map<String, dynamic> gltf, Uint8List? glbBin) = _readContainer(bytes);
     final buffers = _resolveBuffers(gltf, glbBin);
 
