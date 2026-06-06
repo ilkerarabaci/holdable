@@ -22,6 +22,9 @@ Future<void> _pickSample(BuildContext context, WidgetRef ref) async {
   final selected = await showModalBottomSheet<SampleModel>(
     context: context,
     backgroundColor: Theme.of(context).colorScheme.surface,
+    // Scroll-controlled + a scrollable list so every sample is reachable — the
+    // fixed-height Column cut off the last entries (Torus/Sphere) off-screen.
+    isScrollControlled: true,
     builder: (_) => SafeArea(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -33,12 +36,21 @@ Future<void> _pickSample(BuildContext context, WidgetRef ref) async {
               child: Text('Sample models'),
             ),
           ),
-          for (final s in kSampleModels)
-            ListTile(
-              leading: const Icon(LucideIcons.box),
-              title: Text(s.name),
-              onTap: () => Navigator.pop(context, s),
+          Flexible(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final s in kSampleModels)
+                  ListTile(
+                    leading: const Icon(LucideIcons.box),
+                    title: Text(s.name),
+                    // Surface the format so the new ones (GLB/glTF/PLY) read.
+                    subtitle: Text('.${s.asset.split('.').last.toUpperCase()}'),
+                    onTap: () => Navigator.pop(context, s),
+                  ),
+              ],
             ),
+          ),
         ],
       ),
     ),
@@ -172,7 +184,7 @@ class _EmptyState extends StatelessWidget {
             Text('Your shelf is empty.',
                 style: t.titleLarge, textAlign: TextAlign.center),
             const SizedBox(height: 8),
-            Text('Drop a .obj or .stl to begin.',
+            Text('Drop an .obj, .stl, .glb, .gltf or .ply to begin.',
                 style: t.bodyMedium?.copyWith(color: c.textMuted),
                 textAlign: TextAlign.center),
           ],
