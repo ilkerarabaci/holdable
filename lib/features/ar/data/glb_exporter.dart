@@ -45,15 +45,12 @@ Uint8List glbFromMesh(MeshData mesh, {String name = 'model'}) {
   // non-indexed). Narrowest type that fits.
   final List<int> indices;
   final int indexComponentType;
-  final int indexStride;
   if (mesh.indices16 != null) {
     indices = mesh.indices16!;
     indexComponentType = _u16;
-    indexStride = 2;
   } else if (mesh.indices32 != null) {
     indices = mesh.indices32!;
     indexComponentType = _u32;
-    indexStride = 4;
   } else if (vc <= 0x10000) {
     final u = Uint16List(vc);
     for (var i = 0; i < vc; i++) {
@@ -61,7 +58,6 @@ Uint8List glbFromMesh(MeshData mesh, {String name = 'model'}) {
     }
     indices = u;
     indexComponentType = _u16;
-    indexStride = 2;
   } else {
     final u = Uint32List(vc);
     for (var i = 0; i < vc; i++) {
@@ -69,7 +65,6 @@ Uint8List glbFromMesh(MeshData mesh, {String name = 'model'}) {
     }
     indices = u;
     indexComponentType = _u32;
-    indexStride = 4;
   }
   final indexCount = indices.length;
 
