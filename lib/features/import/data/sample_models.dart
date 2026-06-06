@@ -16,4 +16,5 @@ const kSampleModels = <SampleModel>[
   SampleModel(name: 'Lamp shade', asset: 'assets/sample_models/lamp_shade.stl'),
   SampleModel(name: 'Cube (OBJ)', asset: 'assets/sample_models/cube.obj'),
   SampleModel(name: 'Torus (GLB)', asset: 'assets/sample_models/torus.glb'),
+  SampleModel(name: 'Sphere (PLY)', asset: 'assets/sample_models/sphere.ply'),
 ];

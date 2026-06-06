@@ -5,7 +5,8 @@ enum ModelFormat {
   obj,
   stl,
   glb,
-  gltf;
+  gltf,
+  ply;
 
   String get label => '.${name.toUpperCase()}';
 
@@ -16,6 +17,7 @@ enum ModelFormat {
       'stl' => ModelFormat.stl,
       'glb' => ModelFormat.glb,
       'gltf' => ModelFormat.gltf,
+      'ply' => ModelFormat.ply,
       _ => null,
     };
   }
