@@ -32,12 +32,14 @@ class ViewerScreen extends ConsumerStatefulWidget {
   ConsumerState<ViewerScreen> createState() => _ViewerScreenState();
 }
 
-enum _Tab { view, render, info }
+enum _Tab { none, view, render, info }
 
 class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   final ModelSceneController _scene = ModelSceneController();
   late LibraryModel _model;
-  _Tab _tab = _Tab.view;
+  // Open clean (model unobstructed); panels are dismissible overlays toggled
+  // from the toolbar, closed by back / tapping the scene.
+  _Tab _tab = _Tab.none;
   ModelSceneStatus _status = const ModelSceneStatus(loading: true);
 
   /// null = still checking, false = device GPU can't run the native viewer.
@@ -116,7 +118,13 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         ? models[index + 1]
         : null;
 
-    return Scaffold(
+    return PopScope(
+      // Back closes an open panel first; only pops the viewer when none is open.
+      canPop: _tab == _Tab.none,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) setState(() => _tab = _Tab.none);
+      },
+      child: Scaffold(
       backgroundColor: c.bg,
       appBar: AppBar(
         backgroundColor: c.bg,
@@ -163,6 +171,15 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                     textAlign: TextAlign.center),
               ),
             ),
+          // Tap the scene (anywhere but the panel) to dismiss an open panel.
+          // Translucent + tap-only so orbit/pan drags still reach the scene.
+          if (_tab != _Tab.none)
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: () => setState(() => _tab = _Tab.none),
+              ),
+            ),
           if (_tab == _Tab.view)
             Positioned(
                 left: 0,
@@ -195,7 +212,9 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       ),
       bottomNavigationBar: _Toolbar(
         current: _tab,
-        onSelect: (t) => setState(() => _tab = t),
+        // Re-tapping the active tab closes its panel.
+        onSelect: (t) => setState(() => _tab = _tab == t ? _Tab.none : t),
+      ),
       ),
     );
   }
