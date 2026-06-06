@@ -268,17 +268,27 @@ class _ModelGrid extends ConsumerWidget {
       return;
     }
     final fileName = '${model.name}.${model.format.name}';
-    // iPad needs the originating rect for the share popover; harmless elsewhere.
-    final box = context.findRenderObject() as RenderBox?;
-    final origin = box != null
-        ? box.localToGlobal(Offset.zero) & box.size
-        : null;
+    // iPad needs the originating rect for the share popover. This is called from
+    // a GridView item context whose render object is a RenderSliver (NOT a
+    // RenderBox), so an `as RenderBox?` cast THROWS — and since this ran before
+    // shareXFiles, the share silently died and the sheet never opened (the
+    // alpha.11/12 bug). Use a safe `is` check, falling back to the screen rect.
+    Rect? origin;
+    final ro = context.findRenderObject();
+    if (ro is RenderBox && ro.hasSize) {
+      origin = ro.localToGlobal(Offset.zero) & ro.size;
+    } else {
+      final size = MediaQuery.maybeOf(context)?.size;
+      if (size != null) {
+        origin = Rect.fromCenter(
+            center: size.center(Offset.zero), width: 1, height: 1);
+      }
+    }
     try {
       await Share.shareXFiles(
         [
           // Explicit MIME — .obj/.stl have no registered type, so without this
-          // the receiving app gets an empty type and many silently reject it
-          // (the share sheet appears but "Share" does nothing).
+          // some receivers get an empty type and reject the file.
           XFile(model.filePath,
               name: fileName, mimeType: 'application/octet-stream'),
         ],
