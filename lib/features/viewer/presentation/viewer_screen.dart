@@ -13,6 +13,8 @@ import '../../../app/theme/prism_colors.dart';
 import '../../../app/theme/prism_gradient.dart';
 import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
+import '../../ar/data/ar_export.dart';
+import '../../ar/presentation/ar_view_screen.dart';
 import '../data/gpu_support.dart';
 import '../data/native_stats.dart';
 import '../data/thumbnail_service.dart' show kThumbnailVersionSuffix;
@@ -98,6 +100,27 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
           .read(libraryControllerProvider.notifier)
           .setThumbnail(_model.id, path);
     } catch (_) {/* best-effort */}
+  }
+
+  /// Exports the current model to a temp GLB and opens the AR placement screen.
+  Future<void> _openAr() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('Preparing AR…')));
+    final name = await exportModelToGlb(
+      filePath: _model.filePath,
+      format: _model.format.name,
+    );
+    if (!mounted) return;
+    if (name == null) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text("Couldn't prepare this model for AR.")),
+      );
+      return;
+    }
+    await navigator.push(MaterialPageRoute<void>(
+      builder: (_) => ArViewScreen(glbFileName: name, title: _model.name),
+    ));
   }
 
   /// Loads a different model into the existing scene (prev/next nav).
@@ -214,6 +237,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         current: _tab,
         // Re-tapping the active tab closes its panel.
         onSelect: (t) => setState(() => _tab = _tab == t ? _Tab.none : t),
+        onAr: _openAr,
       ),
       ),
     );
@@ -255,9 +279,10 @@ class _UnsupportedGpu extends StatelessWidget {
 }
 
 class _Toolbar extends StatelessWidget {
-  const _Toolbar({required this.current, required this.onSelect});
+  const _Toolbar({required this.current, required this.onSelect, this.onAr});
   final _Tab current;
   final ValueChanged<_Tab> onSelect;
+  final VoidCallback? onAr;
 
   @override
   Widget build(BuildContext context) {
@@ -276,8 +301,7 @@ class _Toolbar extends StatelessWidget {
                 active: current == _Tab.render, onTap: () => onSelect(_Tab.render)),
             _ToolButton(icon: LucideIcons.info, label: 'Info',
                 active: current == _Tab.info, onTap: () => onSelect(_Tab.info)),
-            const _ToolButton(icon: LucideIcons.scan, label: 'AR',
-                disabled: true, badge: 'SOON'),
+            _ToolButton(icon: LucideIcons.scan, label: 'AR', onTap: onAr),
           ],
         ),
       ),
@@ -290,25 +314,19 @@ class _ToolButton extends StatelessWidget {
     required this.icon,
     required this.label,
     this.active = false,
-    this.disabled = false,
-    this.badge,
     this.onTap,
   });
   final IconData icon;
   final String label;
   final bool active;
-  final bool disabled;
-  final String? badge;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final c = context.prism;
-    final color = disabled
-        ? c.textMuted
-        : (active ? PrismGradient.violet : c.textPrimary);
+    final color = active ? PrismGradient.violet : c.textPrimary;
     return InkWell(
-      onTap: disabled ? null : onTap,
+      onTap: onTap,
       borderRadius: BorderRadius.circular(12),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
@@ -317,12 +335,7 @@ class _ToolButton extends StatelessWidget {
           children: [
             Icon(icon, size: 22, color: color),
             const SizedBox(height: 4),
-            Text(badge ?? label,
-                style: TextStyle(
-                  fontSize: badge != null ? 9 : 11,
-                  color: color,
-                  fontFamily: badge != null ? 'monospace' : null,
-                )),
+            Text(label, style: TextStyle(fontSize: 11, color: color)),
           ],
         ),
       ),

@@ -19,9 +19,10 @@ android {
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "app.holdable"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // AR-1 spike (ADR-003): ar_flutter_plugin_2 (ARCore + arsceneview) sets
+        // minSdkVersion 28, so the app floor rises to Android 9. Product note:
+        // this drops Android 8 and below — acceptable given current install base.
+        minSdk = maxOf(28, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
