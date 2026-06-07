@@ -8,9 +8,15 @@ import '../../viewer/data/model_parser.dart';
 import 'glb_exporter.dart';
 
 /// Exports a model to a `.glb` in the app's documents folder for the AR layer
-/// (ar_flutter_plugin_2 loads `NodeType.fileSystemAppFolderGLB` by a name
-/// relative to that folder). Parsing + GLB serialization run off the UI isolate.
-/// Returns the relative file name, or null on failure.
+/// and returns its **absolute path** (or null on failure). Parsing + GLB
+/// serialization run off the UI isolate.
+///
+/// NOTE: ar_flutter_plugin_2 0.0.3's native `fileSystemAppFolderGLB` branch is a
+/// no-op (`fileLocation = fileLocation`) — it does NOT prepend the documents dir
+/// to a relative name, so a bare file name fails to load (the model never
+/// appears; addNode returns false). It passes the uri verbatim to SceneView's
+/// `modelLoader.loadModelInstance`, which accepts an absolute file path — so we
+/// hand it the full path.
 Future<String?> exportModelToGlb({
   required String filePath,
   required String format,
@@ -19,9 +25,9 @@ Future<String?> exportModelToGlb({
     final glb = await compute(_glbEntry, _GlbRequest(filePath, format));
     if (glb == null) return null;
     final docs = await getApplicationDocumentsDirectory();
-    const name = 'holdable_ar.glb';
-    await File('${docs.path}/$name').writeAsBytes(glb);
-    return name;
+    final path = '${docs.path}/holdable_ar.glb';
+    await File(path).writeAsBytes(glb);
+    return path;
   } catch (_) {
     return null;
   }
