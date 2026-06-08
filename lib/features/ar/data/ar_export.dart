@@ -42,5 +42,7 @@ class _GlbRequest {
 Uint8List? _glbEntry(_GlbRequest req) {
   final bytes = File(req.path).readAsBytesSync();
   final mesh = ModelParser.parse(bytes, format: req.format);
-  return glbFromMesh(mesh);
+  // Carry the model's own colour into AR (e.g. the orange chair shows orange,
+  // not a neutral grey).
+  return glbFromMesh(mesh, baseColorArgb: mesh.baseColorArgb);
 }

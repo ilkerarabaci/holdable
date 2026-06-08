@@ -48,6 +48,13 @@ class ModelSceneController {
 
   /// Sets the model's base color (the surface tint the light shades).
   void setColor(Color color) => _state?._setColor(color);
+
+  /// Light-rig intensity multiplier (0.2–2.5; 1.0 = default brightness).
+  void setLightIntensity(double factor) =>
+      _state?._setLightIntensity(factor);
+
+  /// Rotates the whole light rig around Y by [azimuthRad] (relight angle).
+  void setLightAngle(double azimuthRad) => _state?._setLightAzimuth(azimuthRad);
 }
 
 /// 3D viewer surface — **v0.3, Thermion (Google Filament)**.
@@ -92,6 +99,18 @@ class ModelSceneView extends StatefulWidget {
 /// Default model surface color until the user picks one (a light neutral).
 const Color _kNeutral = Color(0xFFD1D1DB);
 
+/// The base 6-sun rig (dir x,y,z, intensity): a key + two fills + three dim
+/// counter-lights so every facet catches some light without an IBL. The user's
+/// intensity multiplier + azimuth rotation are applied on top (see _setLight*).
+const List<(double, double, double, double)> _kLightRig = [
+  (0.3, -0.8, 0.5, 70000),
+  (-0.6, -0.2, -0.5, 38000),
+  (0.1, 0.9, -0.3, 22000),
+  (-0.3, 0.8, -0.5, 26000),
+  (0.6, 0.2, 0.5, 18000),
+  (-0.1, -0.9, 0.3, 14000),
+];
+
 class _ModelSceneViewState extends State<ModelSceneView> {
   ThermionViewer? _viewer;
   Camera? _camera;
@@ -119,6 +138,11 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   String _mode = 'solid';
   Color _baseColor = _kNeutral;
   double _currentAlpha = 1.0; // 0.35 in x-ray
+  // Adjustable light rig (see _kLightRig): stored entities + the user's
+  // intensity multiplier and azimuth rotation (radians, around Y).
+  final List<ThermionEntity> _lights = [];
+  double _lightIntensity = 1.0;
+  double _lightAzimuth = 0.0;
   bool _rebuilding = false;
   String? _pendingMode; // latest mode requested while a rebuild was in flight
 
@@ -185,37 +209,15 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       // the model with six suns (the key/fill/rim plus three dim counter-lights
       // roughly opposite them) so every facet picks up some light — a poor-man's
       // ambient that kills the half-black look without an IBL.
-      await viewer.addDirectLight(DirectLight.sun(
-        direction: Vector3(0.3, -0.8, 0.5)..normalize(),
-        intensity: 70000,
-        castShadows: false,
-      ));
-      await viewer.addDirectLight(DirectLight.sun(
-        direction: Vector3(-0.6, -0.2, -0.5)..normalize(),
-        intensity: 38000,
-        castShadows: false,
-      ));
-      await viewer.addDirectLight(DirectLight.sun(
-        direction: Vector3(0.1, 0.9, -0.3)..normalize(),
-        intensity: 22000,
-        castShadows: false,
-      ));
-      // Counter-lights (opposite the trio) to fill the shadowed facets.
-      await viewer.addDirectLight(DirectLight.sun(
-        direction: Vector3(-0.3, 0.8, -0.5)..normalize(),
-        intensity: 26000,
-        castShadows: false,
-      ));
-      await viewer.addDirectLight(DirectLight.sun(
-        direction: Vector3(0.6, 0.2, 0.5)..normalize(),
-        intensity: 18000,
-        castShadows: false,
-      ));
-      await viewer.addDirectLight(DirectLight.sun(
-        direction: Vector3(-0.1, -0.9, 0.3)..normalize(),
-        intensity: 14000,
-        castShadows: false,
-      ));
+      _lights.clear();
+      for (final (x, y, z, inten) in _kLightRig) {
+        final e = await viewer.addDirectLight(DirectLight.sun(
+          direction: _rotatedDir(x, y, z, _lightAzimuth),
+          intensity: inten * _lightIntensity,
+          castShadows: false,
+        ));
+        _lights.add(e);
+      }
       // Filmic tone mapping + a touch of bloom give the render richer, more
       // natural color/contrast than the raw linear output (the next lighting
       // step is a real IBL environment). Best-effort: keep going if unsupported.
@@ -521,6 +523,45 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     _baseColor = color;
     final mi = _material;
     if (mi != null) await _applyColorTo(mi);
+  }
+
+  /// Rotates a base light direction [x],[y],[z] around the Y axis by [az] rad
+  /// (so the whole rig swings to relight the model from a new angle).
+  Vector3 _rotatedDir(double x, double y, double z, double az) {
+    final ca = math.cos(az), sa = math.sin(az);
+    return Vector3(x * ca + z * sa, y, -x * sa + z * ca)..normalize();
+  }
+
+  /// Re-aims every light for a new rig azimuth (cheap — direction only, no
+  /// re-creation). Live as the angle slider drags.
+  Future<void> _setLightAzimuth(double az) async {
+    _lightAzimuth = az;
+    final v = _viewer;
+    if (v == null) return;
+    for (var i = 0; i < _lights.length && i < _kLightRig.length; i++) {
+      final (x, y, z, _) = _kLightRig[i];
+      await v.setLightDirection(_lights[i], _rotatedDir(x, y, z, az));
+    }
+  }
+
+  /// Re-creates the rig at a new intensity multiplier (Thermion has no runtime
+  /// intensity setter, so remove + re-add — lights are cheap). Call on release.
+  Future<void> _setLightIntensity(double factor) async {
+    _lightIntensity = factor.clamp(0.2, 2.5);
+    final v = _viewer;
+    if (v == null) return;
+    for (final e in _lights) {
+      await v.removeLight(e);
+    }
+    _lights.clear();
+    for (final (x, y, z, inten) in _kLightRig) {
+      final e = await v.addDirectLight(DirectLight.sun(
+        direction: _rotatedDir(x, y, z, _lightAzimuth),
+        intensity: inten * _lightIntensity,
+        castShadows: false,
+      ));
+      _lights.add(e);
+    }
   }
 
   void _setRenderMode(String mode) {
