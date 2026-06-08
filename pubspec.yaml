@@ -19,7 +19,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # v0.3 = Thermion (Google Filament) native renderer line. Prior lines kept for
 # rollback: v0.1 WebView (tag v0.1.0-alpha-webview), v0.2 flutter_scene (tag
 # v0.2.0-alpha-flutterscene). See docs/adr-002-renderer-reassessment.md.
-version: 0.3.0+23
+version: 0.3.0+24
 
 environment:
   sdk: ^3.12.0
@@ -65,6 +65,7 @@ dependencies:
   # Maintained ar_flutter_plugin fork on SceneView/Filament. Loads the model as a
   # GLB exported by glb_exporter.dart. Raises the Android floor to minSdk 28.
   ar_flutter_plugin_2: ^0.0.3
+  flutter_colorpicker: ^1.1.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

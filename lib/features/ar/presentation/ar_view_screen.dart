@@ -46,6 +46,15 @@ class _ArViewScreenState extends State<ArViewScreen> {
   ARNode? _node;
   ARAnchor? _anchor;
   bool _placed = false;
+  double _scale = 0.2; // current placed scale (re-added on +/- since the plugin
+  // has no runtime node-scale method — only addNode/removeNode).
+
+  ARNode _makeNode(double scale) => ARNode(
+        type: NodeType.fileSystemAppFolderGLB,
+        uri: 'file://${widget.glbAbsolutePath}',
+        scale: vm.Vector3.all(scale),
+        position: vm.Vector3.zero(),
+      );
 
   @override
   void dispose() {
@@ -99,12 +108,7 @@ class _ArViewScreenState extends State<ArViewScreen> {
       }
       _anchor = anchor;
 
-      final node = ARNode(
-        type: NodeType.fileSystemAppFolderGLB,
-        uri: 'file://${widget.glbAbsolutePath}',
-        scale: vm.Vector3.all(0.2),
-        position: vm.Vector3.zero(),
-      );
+      final node = _makeNode(_scale);
       final added = await objects.addNode(node, planeAnchor: anchor);
       if (added == true && mounted) {
         _node = node;
@@ -114,6 +118,22 @@ class _ArViewScreenState extends State<ArViewScreen> {
       }
     } catch (_) {
       _toast("Couldn't place the model.");
+    }
+  }
+
+  /// Resize the placed model. The plugin can't update a live node's scale, so
+  /// remove it and re-add at the new scale on the SAME anchor (no re-anchor).
+  Future<void> _rescale(double factor) async {
+    final objects = _objectManager, anchor = _anchor;
+    if (!_placed || objects == null || anchor is! ARPlaneAnchor) return;
+    final next = (_scale * factor).clamp(0.02, 2.0);
+    if (next == _scale) return;
+    if (_node != null) await objects.removeNode(_node!);
+    final node = _makeNode(next);
+    final added = await objects.addNode(node, planeAnchor: anchor);
+    if (added == true && mounted) {
+      _node = node;
+      setState(() => _scale = next);
     }
   }
 
@@ -173,6 +193,52 @@ class _ArViewScreenState extends State<ArViewScreen> {
                     style: TextStyle(color: Colors.white),
                   ),
                 ),
+              ),
+            ),
+          if (_placed)
+            Positioned(
+              left: 12,
+              right: 12,
+              bottom: 28,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Drag to move · two fingers to rotate',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                  const SizedBox(height: 10),
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.6),
+                        borderRadius: BorderRadius.circular(28),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: 'Smaller',
+                            color: Colors.white,
+                            onPressed: () => _rescale(0.8),
+                            icon: const Icon(Icons.remove_circle_outline),
+                          ),
+                          const Icon(Icons.straighten,
+                              color: Colors.white70, size: 18),
+                          IconButton(
+                            tooltip: 'Bigger',
+                            color: Colors.white,
+                            onPressed: () => _rescale(1.25),
+                            icon: const Icon(Icons.add_circle_outline),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
         ],

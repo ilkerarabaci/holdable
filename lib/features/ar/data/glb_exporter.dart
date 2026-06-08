@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../../viewer/data/model_parser.dart';
@@ -23,8 +24,13 @@ const int _u32 = 5125; // UNSIGNED_INT
 const int _arrayBuffer = 34962;
 const int _elementArrayBuffer = 34963;
 
-/// Builds `.glb` bytes for [mesh]. [name] labels the node.
-Uint8List glbFromMesh(MeshData mesh, {String name = 'model'}) {
+double _srgbToLinear(double c) =>
+    c <= 0.04045 ? c / 12.92 : math.pow((c + 0.055) / 1.055, 2.4).toDouble();
+
+/// Builds `.glb` bytes for [mesh]. [name] labels the node. [baseColorArgb]
+/// (0xAARRGGBB, sRGB) overrides the neutral surface colour — used to re-export
+/// a model in its own colour (sRGB is converted to glTF's linear space).
+Uint8List glbFromMesh(MeshData mesh, {String name = 'model', int? baseColorArgb}) {
   final vc = mesh.vertexCount;
   final src = mesh.vertices; // interleaved [px,py,pz, nx,ny,nz, u,v, r,g,b,a]
 
@@ -117,7 +123,14 @@ Uint8List glbFromMesh(MeshData mesh, {String name = 'model'}) {
         'name': 'surface',
         'doubleSided': true,
         'pbrMetallicRoughness': {
-          'baseColorFactor': [0.82, 0.82, 0.86, 1.0],
+          'baseColorFactor': baseColorArgb == null
+              ? [0.82, 0.82, 0.86, 1.0]
+              : [
+                  _srgbToLinear(((baseColorArgb >> 16) & 0xFF) / 255),
+                  _srgbToLinear(((baseColorArgb >> 8) & 0xFF) / 255),
+                  _srgbToLinear((baseColorArgb & 0xFF) / 255),
+                  1.0,
+                ],
           'metallicFactor': 0.0,
           'roughnessFactor': 0.75,
         },
