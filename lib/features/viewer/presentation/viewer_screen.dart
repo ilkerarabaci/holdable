@@ -119,7 +119,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
       return;
     }
     await navigator.push(MaterialPageRoute<void>(
-      builder: (_) => ArViewScreen(glbFileName: name, title: _model.name),
+      builder: (_) => ArViewScreen(glbAbsolutePath: name, title: _model.name),
     ));
   }
 
