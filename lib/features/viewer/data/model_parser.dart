@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'gltf_parser.dart';
 import 'ply_parser.dart';
+import 'threemf_parser.dart';
 
 /// Parsing of `.obj` / `.stl` / `.glb` / `.gltf` / `.ply` model files into mesh data.
 ///
@@ -101,10 +102,13 @@ class ModelParser {
         return GltfParser.parse(bytes);
       case 'ply':
         return PlyParser.parse(bytes);
+      case '3mf':
+      case 'threemf':
+        return ThreeMfParser.parse(bytes);
       default:
         throw ModelParseException(
           'Unsupported format ${fmt ?? '(unknown)'} — '
-          'expected obj, stl, glb, gltf or ply',
+          'expected obj, stl, glb, gltf, ply or 3mf',
         );
     }
   }

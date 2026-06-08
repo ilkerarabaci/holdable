@@ -58,6 +58,9 @@ dependencies:
   thermion_flutter: ^0.3.4
   # Vector/matrix math for the camera + transforms (also a thermion dep).
   vector_math: ^2.1.4
+  # Pure-Dart ZIP — 3MF import (a 3MF file is a zip containing the mesh XML).
+  # Pinned to ^4.0.0 to match thermion_dart's constraint.
+  archive: ^4.0.0
   # AR-1 (ADR-003): surface placement via ARCore (Android) / ARKit (iOS).
   # Maintained ar_flutter_plugin fork on SceneView/Filament. Loads the model as a
   # GLB exported by glb_exporter.dart. Raises the Android floor to minSdk 28.

@@ -109,7 +109,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     messenger.showSnackBar(const SnackBar(content: Text('Preparing AR…')));
     final name = await exportModelToGlb(
       filePath: _model.filePath,
-      format: _model.format.name,
+      format: _model.format.fileExtension,
     );
     if (!mounted) return;
     if (name == null) {
@@ -177,7 +177,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
             child: ModelSceneView(
               controller: _scene,
               filePath: _model.filePath,
-              format: _model.format.name,
+              format: _model.format.fileExtension,
               background: c.bg,
               onStatus: _onStatus,
               onThumbnail: _saveThumbnail,

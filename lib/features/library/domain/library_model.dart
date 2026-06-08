@@ -6,9 +6,16 @@ enum ModelFormat {
   stl,
   glb,
   gltf,
-  ply;
+  ply,
+  // Enum names can't start with a digit, so '3mf' is `threemf`; [label] +
+  // [fileExtension] map it back to the real "3mf".
+  threemf;
 
-  String get label => '.${name.toUpperCase()}';
+  String get label =>
+      this == threemf ? '.3MF' : '.${name.toUpperCase()}';
+
+  /// The on-disk extension / the format string passed to ModelParser.parse.
+  String get fileExtension => this == threemf ? '3mf' : name;
 
   static ModelFormat? fromExtension(String ext) {
     final e = ext.toLowerCase().replaceAll('.', '');
@@ -18,6 +25,7 @@ enum ModelFormat {
       'glb' => ModelFormat.glb,
       'gltf' => ModelFormat.gltf,
       'ply' => ModelFormat.ply,
+      '3mf' => ModelFormat.threemf,
       _ => null,
     };
   }

@@ -75,7 +75,7 @@ class ImportSheet extends ConsumerWidget {
             _Row(
               icon: LucideIcons.folderOpen,
               title: 'Files',
-              subtitle: 'Pick an .obj, .stl, .glb, .gltf or .ply',
+              subtitle: '.obj · .stl · .glb · .gltf · .ply · .3mf',
               onTap: () async {
                 if (onPickFiles != null) {
                   Navigator.of(context).pop();

@@ -77,7 +77,12 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: flutter build apk --profile
+      # arm64-only profile APK — the universal build shipped 3 ABIs (arm64-v8a +
+      # armeabi-v7a + x86_64), which ~tripled the size once AR's second Filament
+      # native landed (~145MB). Every real target (incl. the S26 Ultra) is arm64,
+      # so a single-ABI APK is ~1/3 the size. (Play should use an AAB; this keeps
+      # the sideload APK small.)
+      - run: flutter build apk --profile --target-platform android-arm64
       - uses: actions/upload-artifact@v7
         with:
           name: holdable-profile-apk
