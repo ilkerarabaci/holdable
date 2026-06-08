@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:ar_flutter_plugin_2/datatypes/config_planedetection.dart';
 import 'package:ar_flutter_plugin_2/datatypes/hittest_result_types.dart';
 import 'package:ar_flutter_plugin_2/datatypes/node_types.dart';
@@ -105,14 +107,20 @@ class _ArViewScreenState extends State<ArViewScreen> {
       }
       _anchor = anchor;
 
+      final f = File(widget.glbFileName);
+      final exists = f.existsSync();
+      final size = exists ? f.lengthSync() : -1;
       final node = ARNode(
         type: NodeType.fileSystemAppFolderGLB,
-        uri: widget.glbFileName,
+        // SceneView's loadModelInstance didn't load a raw absolute path; try a
+        // file:// URI (it does load http URLs, so URL-style may resolve).
+        uri: 'file://${widget.glbFileName}',
         scale: vm.Vector3.all(0.2),
         position: vm.Vector3.zero(),
       );
       final added = await objects.addNode(node, planeAnchor: anchor);
-      _setDbg('hits=${hits.length} plane=${planeHits.length} '
+      _setDbg('exists=$exists size=$size added=$added\n'
+          'hits=${hits.length} plane=${planeHits.length} '
           'anchored=$anchored added=$added glb=${widget.glbFileName}');
       if (added == true && mounted) {
         _node = node;
