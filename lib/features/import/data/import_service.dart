@@ -70,7 +70,7 @@ class ImportService {
     final format = ModelFormat.fromExtension(_ext(path));
     if (format == null) {
       return const ImportResult(ImportStatus.unsupported,
-          message: 'Supported formats: .obj, .stl, .glb, .gltf');
+          message: 'Supported formats: .obj, .stl, .glb, .gltf, .ply, .3mf');
     }
     try {
       final source = File(path);
@@ -89,7 +89,7 @@ class ImportService {
 
       final now = DateTime.now();
       final id = now.microsecondsSinceEpoch.toString();
-      final dest = '${modelsDir.path}/$id.${format.name}';
+      final dest = '${modelsDir.path}/$id.${format.fileExtension}';
       await source.copy(dest);
 
       final model = LibraryModel(
@@ -125,7 +125,7 @@ class ImportService {
 
       final now = DateTime.now();
       final id = now.microsecondsSinceEpoch.toString();
-      final dest = '${modelsDir.path}/$id.${format.name}';
+      final dest = '${modelsDir.path}/$id.${format.fileExtension}';
       await File(dest).writeAsBytes(bytes);
 
       final model = LibraryModel(

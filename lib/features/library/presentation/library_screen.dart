@@ -184,7 +184,7 @@ class _EmptyState extends StatelessWidget {
             Text('Your shelf is empty.',
                 style: t.titleLarge, textAlign: TextAlign.center),
             const SizedBox(height: 8),
-            Text('Drop an .obj, .stl, .glb, .gltf or .ply to begin.',
+            Text('Drop an .obj, .stl, .glb, .gltf, .ply or .3mf to begin.',
                 style: t.bodyMedium?.copyWith(color: c.textMuted),
                 textAlign: TextAlign.center),
           ],
@@ -279,7 +279,7 @@ class _ModelGrid extends ConsumerWidget {
       );
       return;
     }
-    final fileName = '${model.name}.${model.format.name}';
+    final fileName = '${model.name}.${model.format.fileExtension}';
     // iPad needs the originating rect for the share popover. This is called from
     // a GridView item context whose render object is a RenderSliver (NOT a
     // RenderBox), so an `as RenderBox?` cast THROWS — and since this ran before

@@ -17,4 +17,8 @@ const kSampleModels = <SampleModel>[
   SampleModel(name: 'Cube (OBJ)', asset: 'assets/sample_models/cube.obj'),
   SampleModel(name: 'Torus (GLB)', asset: 'assets/sample_models/torus.glb'),
   SampleModel(name: 'Sphere (PLY)', asset: 'assets/sample_models/sphere.ply'),
+  SampleModel(name: 'Gear (3MF)', asset: 'assets/sample_models/gear.3mf'),
+  SampleModel(name: 'Sports car', asset: 'assets/sample_models/car.glb'),
+  SampleModel(name: 'Chair', asset: 'assets/sample_models/chair.glb'),
+  SampleModel(name: 'Mug', asset: 'assets/sample_models/mug.glb'),
 ];

@@ -216,6 +216,13 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         intensity: 14000,
         castShadows: false,
       ));
+      // Filmic tone mapping + a touch of bloom give the render richer, more
+      // natural color/contrast than the raw linear output (the next lighting
+      // step is a real IBL environment). Best-effort: keep going if unsupported.
+      try {
+        await viewer.setToneMapper(await ToneMapper.filmic());
+        await viewer.setBloom(true, 0.08);
+      } catch (_) {/* keep default tone mapping */}
       final camera = await viewer.getActiveCamera();
       if (!mounted) {
         await viewer.dispose();
@@ -249,6 +256,11 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       _model = prepared;
       _lineIndices = null; // invalidate the previous model's wireframe cache
       _thumbCaptured = false;
+      // Show the model in its own colour if it carries one (e.g. a glTF
+      // material). The user can still re-pick from the Render panel.
+      if (prepared.baseColorArgb != null) {
+        _baseColor = Color(prepared.baseColorArgb!);
+      }
       if (_viewerReady) await _applyMode(_mode, frame: true);
       // Thumbnail was rasterized off-isolate alongside the parse (CPU, no GPU).
       // Encode it to PNG on the UI isolate and hand it to the host to persist.
@@ -605,7 +617,11 @@ class _PreparedModel {
     required this.parseMs,
     this.thumbnailRgba,
     this.thumbSize = 0,
+    this.baseColorArgb,
   });
+
+  /// Model-supplied base colour (e.g. a glTF material) used as the initial color.
+  final int? baseColorArgb;
 
   final Float32List positions; // 3 floats / vertex
   final Float32List normals; // 3 floats / vertex
@@ -719,5 +735,6 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
     parseMs: sw.elapsedMilliseconds,
     thumbnailRgba: thumb,
     thumbSize: req.thumbSize,
+    baseColorArgb: mesh.baseColorArgb,
   );
 }

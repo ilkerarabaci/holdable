@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'gltf_parser.dart';
 import 'ply_parser.dart';
+import 'threemf_parser.dart';
 
 /// Parsing of `.obj` / `.stl` / `.glb` / `.gltf` / `.ply` model files into mesh data.
 ///
@@ -54,7 +55,14 @@ class MeshData {
     required this.bounds,
     this.indices16,
     this.indices32,
+    this.baseColorArgb,
   });
+
+  /// Optional model-supplied base color (0xAARRGGBB) — e.g. a glTF material's
+  /// baseColorFactor. The viewer uses it as the model's initial color so an
+  /// imported GLB shows its own color (the user can still re-pick). Null = use
+  /// the neutral default.
+  final int? baseColorArgb;
 
   /// Interleaved vertex buffer, [kFloatsPerVertex] floats per vertex.
   final Float32List vertices;
@@ -101,10 +109,13 @@ class ModelParser {
         return GltfParser.parse(bytes);
       case 'ply':
         return PlyParser.parse(bytes);
+      case '3mf':
+      case 'threemf':
+        return ThreeMfParser.parse(bytes);
       default:
         throw ModelParseException(
           'Unsupported format ${fmt ?? '(unknown)'} — '
-          'expected obj, stl, glb, gltf or ply',
+          'expected obj, stl, glb, gltf, ply or 3mf',
         );
     }
   }
