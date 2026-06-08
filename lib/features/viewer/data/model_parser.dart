@@ -55,7 +55,14 @@ class MeshData {
     required this.bounds,
     this.indices16,
     this.indices32,
+    this.baseColorArgb,
   });
+
+  /// Optional model-supplied base color (0xAARRGGBB) — e.g. a glTF material's
+  /// baseColorFactor. The viewer uses it as the model's initial color so an
+  /// imported GLB shows its own color (the user can still re-pick). Null = use
+  /// the neutral default.
+  final int? baseColorArgb;
 
   /// Interleaved vertex buffer, [kFloatsPerVertex] floats per vertex.
   final Float32List vertices;

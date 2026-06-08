@@ -99,10 +99,31 @@ class GltfParser {
     final indices = <int>[];
     var vertexOffset = 0;
     final b = _BoundsAccumulator();
+    final materials = (gltf['materials'] as List?) ?? const [];
+    int? firstColorArgb;
 
     void addPrimitive(Map<String, dynamic> prim, Float64List world) {
       final mode = prim['mode'] as int? ?? 4;
       if (mode != 4) return; // TRIANGLES only
+      // Capture the first primitive's material colour so the viewer can show the
+      // model in its own colour (e.g. a red car). glTF baseColorFactor is LINEAR;
+      // convert to sRGB so the viewer's sRGB→linear path reproduces it.
+      if (firstColorArgb == null && prim['material'] is int) {
+        final mi = prim['material'] as int;
+        if (mi >= 0 && mi < materials.length) {
+          final pbr = (materials[mi] as Map<String, dynamic>?)?[
+              'pbrMetallicRoughness'] as Map<String, dynamic>?;
+          final bcf = pbr?['baseColorFactor'];
+          if (bcf is List && bcf.length >= 3) {
+            int ch(num v) =>
+                (_linearToSrgb(v.toDouble().clamp(0.0, 1.0)) * 255).round();
+            firstColorArgb = (0xFF << 24) |
+                (ch(bcf[0]) << 16) |
+                (ch(bcf[1]) << 8) |
+                ch(bcf[2]);
+          }
+        }
+      }
       final attrs = prim['attributes'] as Map<String, dynamic>?;
       if (attrs == null || attrs['POSITION'] == null) return;
       final positions = readVec3(attrs['POSITION'] as int);
@@ -196,6 +217,7 @@ class GltfParser {
       triangleCount: indices.length ~/ 3,
       bounds: b.build(),
       indices32: Uint32List.fromList(indices),
+      baseColorArgb: firstColorArgb,
     );
   }
 
@@ -320,6 +342,11 @@ class GltfParser {
     out[15] = 1.0;
     return out;
   }
+
+  /// Linear → sRGB (glTF colours are linear; the viewer stores an sRGB colour
+  /// and converts back to linear when applying it).
+  static double _linearToSrgb(double c) =>
+      c <= 0.0031308 ? c * 12.92 : 1.055 * math.pow(c, 1 / 2.4) - 0.055;
 
   static Float64List _smoothNormals(
       Float64List positions, List<int> indices, int vCount) {
