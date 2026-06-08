@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:ar_flutter_plugin_2/datatypes/config_planedetection.dart';
 import 'package:ar_flutter_plugin_2/datatypes/hittest_result_types.dart';
 import 'package:ar_flutter_plugin_2/datatypes/node_types.dart';
@@ -15,20 +13,26 @@ import 'package:flutter/material.dart';
 import 'package:vector_math/vector_math_64.dart' as vm;
 
 /// AR-1 "View in AR" (ADR-003): place the model on a real surface, walk around
-/// it, drag/rotate it. The model is handed in as a `.glb` already written to the
-/// app's documents folder ([glbFileName], a relative name) by ar_export.dart.
+/// it, drag/rotate it. The model is handed in as a `.glb` at [glbAbsolutePath]
+/// (already written to the app's documents folder by ar_export.dart).
 ///
 /// Uses ar_flutter_plugin_2 (ARCore / ARKit via SceneView, its own Filament
 /// renderer — so this shows a plainly-lit GLB, not Holdable's render modes).
 /// One model at a time: tapping a new surface re-places it.
+///
+/// Loading note: the plugin's `fileSystemAppFolderGLB` doesn't resolve a
+/// relative name (its native branch is a no-op), and SceneView's loader won't
+/// read a bare absolute path — but it DOES resolve a `file://` URI, so that's
+/// what we pass. (Confirmed on device: a bare path → addNode false; `file://` →
+/// the model appears.)
 class ArViewScreen extends StatefulWidget {
   const ArViewScreen({
     super.key,
-    required this.glbFileName,
+    required this.glbAbsolutePath,
     required this.title,
   });
 
-  final String glbFileName;
+  final String glbAbsolutePath;
   final String title;
 
   @override
@@ -42,12 +46,6 @@ class _ArViewScreenState extends State<ArViewScreen> {
   ARNode? _node;
   ARAnchor? _anchor;
   bool _placed = false;
-  // DIAGNOSTIC overlay: surfaces each placement step so a single on-device tap
-  // tells us where it breaks (camera+tracking already work; placement doesn't).
-  String _debug = 'Move the phone to scan, then tap a surface…';
-  void _setDbg(String s) {
-    if (mounted) setState(() => _debug = s);
-  }
 
   @override
   void dispose() {
@@ -76,22 +74,18 @@ class _ArViewScreenState extends State<ArViewScreen> {
   }
 
   Future<void> _onPlaneTap(List<ARHitTestResult> hits) async {
-    try {
-      final objects = _objectManager, anchors = _anchorManager;
-      if (objects == null || anchors == null) {
-        _setDbg('AR not ready');
-        return;
-      }
-      final planeHits =
-          hits.where((h) => h.type == ARHitTestResultType.plane).toList();
-      final hit = planeHits.isNotEmpty
-          ? planeHits.first
-          : (hits.isNotEmpty ? hits.first : null);
-      if (hit == null) {
-        _setDbg('${hits.length} hits, 0 usable — scan the surface more');
-        return;
-      }
+    final objects = _objectManager, anchors = _anchorManager;
+    if (objects == null || anchors == null) return;
 
+    // Prefer a real plane hit; fall back to any hit.
+    final planeHits =
+        hits.where((h) => h.type == ARHitTestResultType.plane).toList();
+    final hit = planeHits.isNotEmpty
+        ? planeHits.first
+        : (hits.isNotEmpty ? hits.first : null);
+    if (hit == null) return;
+
+    try {
       // One model at a time — clear the previous placement.
       if (_node != null) objects.removeNode(_node!);
       if (_anchor != null) anchors.removeAnchor(_anchor!);
@@ -99,35 +93,34 @@ class _ArViewScreenState extends State<ArViewScreen> {
       _anchor = null;
 
       final anchor = ARPlaneAnchor(transformation: hit.worldTransform);
-      final anchored = await anchors.addAnchor(anchor);
-      if (anchored != true) {
-        _setDbg('hits=${hits.length} plane=${planeHits.length} '
-            'anchored=$anchored (FAILED)');
+      if (await anchors.addAnchor(anchor) != true) {
+        _toast("Couldn't anchor here — try another spot.");
         return;
       }
       _anchor = anchor;
 
-      final f = File(widget.glbFileName);
-      final exists = f.existsSync();
-      final size = exists ? f.lengthSync() : -1;
       final node = ARNode(
         type: NodeType.fileSystemAppFolderGLB,
-        // SceneView's loadModelInstance didn't load a raw absolute path; try a
-        // file:// URI (it does load http URLs, so URL-style may resolve).
-        uri: 'file://${widget.glbFileName}',
+        uri: 'file://${widget.glbAbsolutePath}',
         scale: vm.Vector3.all(0.2),
         position: vm.Vector3.zero(),
       );
       final added = await objects.addNode(node, planeAnchor: anchor);
-      _setDbg('exists=$exists size=$size added=$added\n'
-          'hits=${hits.length} plane=${planeHits.length} '
-          'anchored=$anchored added=$added glb=${widget.glbFileName}');
       if (added == true && mounted) {
         _node = node;
         setState(() => _placed = true);
+      } else {
+        _toast("Couldn't place the model here.");
       }
-    } catch (e) {
-      _setDbg('ERROR: $e');
+    } catch (_) {
+      _toast("Couldn't place the model.");
+    }
+  }
+
+  void _toast(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
     }
   }
 
@@ -162,9 +155,8 @@ class _ArViewScreenState extends State<ArViewScreen> {
             onARViewCreated: _onARViewCreated,
             planeDetectionConfig: PlaneDetectionConfig.horizontal,
           ),
-          // DIAGNOSTIC overlay: always shows the last tap's placement steps so a
-          // single on-device tap reveals where placement breaks.
-          Positioned(
+          if (!_placed)
+            Positioned(
               left: 12,
               right: 12,
               bottom: 36,
@@ -173,13 +165,12 @@ class _ArViewScreenState extends State<ArViewScreen> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
                   decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.7),
+                    color: Colors.black.withValues(alpha: 0.6),
                     borderRadius: BorderRadius.circular(14),
                   ),
-                  child: Text(
-                    _debug,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                  child: const Text(
+                    'Point at a floor or table, then tap to place',
+                    style: TextStyle(color: Colors.white),
                   ),
                 ),
               ),
