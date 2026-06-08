@@ -26,14 +26,10 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        // Package only arm64 native libs. `flutter build --target-platform
-        // android-arm64` slims Flutter's own libs but the plugin .so files
-        // (thermion + arsceneview Filament, ARCore) were still bundled for all 3
-        // ABIs (~85MB). abiFilters drops armeabi-v7a + x86_64 (every real target
-        // is arm64) → ~half again. Play distribution should use an AAB instead.
-        ndk {
-            abiFilters += "arm64-v8a"
-        }
+        // NB: no `ndk.abiFilters` here — it conflicts with the CI's
+        // `flutter build apk --split-per-abi` ("abiFilters cannot be present
+        // when splits abi filters are set"). --split-per-abi already emits a
+        // single-ABI (arm64) APK; that's where the slimming happens.
     }
 
     signingConfigs {
