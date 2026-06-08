@@ -77,14 +77,17 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      # arm64-only profile APK — the universal build shipped 3 ABIs (arm64-v8a +
-      # armeabi-v7a + x86_64), which ~tripled the size once AR's second Filament
-      # native landed (~145MB). Every real target (incl. the S26 Ultra) is arm64,
-      # so a single-ABI APK is ~1/3 the size. (Play should use an AAB; this keeps
-      # the sideload APK small.)
-      - run: flutter build apk --profile --target-platform android-arm64
+      # arm64-only profile APK via --split-per-abi (the canonical single-ABI
+      # build). `--target-platform android-arm64` only slimmed Flutter's own
+      # libapp/libflutter; the plugin natives (thermion + arsceneview Filament,
+      # ARCore) still shipped armv7 + x86_64 dead weight (~13MB), and a
+      # defaultConfig `abiFilters += arm64` didn't strip them. --split-per-abi
+      # emits one APK per ABI containing only that ABI's libs — we ship arm64.
+      # (Play distribution should use an AAB; this keeps the sideload APK lean.
+      # Floor is ~73MB: two Filament renderers + Flutter engine + ARCore.)
+      - run: flutter build apk --profile --split-per-abi
       - uses: actions/upload-artifact@v7
         with:
           name: holdable-profile-apk
-          path: build/app/outputs/flutter-apk/app-profile.apk
+          path: build/app/outputs/flutter-apk/app-arm64-v8a-profile.apk
           if-no-files-found: error
