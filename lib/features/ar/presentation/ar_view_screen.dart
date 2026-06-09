@@ -48,16 +48,46 @@ class _ArViewScreenState extends State<ArViewScreen> {
   bool _placed = false;
   double _scale = 0.2; // current placed scale
   double _rotationY = 0.0; // current placed yaw (radians)
-  // The plugin has no runtime node-transform method (only addNode/removeNode),
-  // so scale + rotation are applied by re-adding the node on the same anchor.
+  vm.Matrix4? _baseTransform; // the tapped surface pose (before our Y rotation)
+  // This plugin's native side ignores a node's rotation — it reads ONLY the
+  // first transform element as a uniform scale (scaleToUnits). So rotation can't
+  // go on the node (passing one corrupts the scale: m00 = scale·cos(yaw), which
+  // is why rotating "resized" the model). Instead we apply scale on the node and
+  // ROTATE THE ANCHOR (the node inherits the anchor's pose) — see _rebuildPlacement.
 
   ARNode _makeNode() => ARNode(
         type: NodeType.fileSystemAppFolderGLB,
         uri: 'file://${widget.glbAbsolutePath}',
-        scale: vm.Vector3.all(_scale),
-        rotation: vm.Vector4(0, 1, 0, _rotationY), // axis-angle about Y
+        scale: vm.Vector3.all(_scale), // clean uniform scale, no rotation
         position: vm.Vector3.zero(),
       );
+
+  /// Removes any current placement and re-adds the anchor (rotated about its
+  /// up-axis by _rotationY) + the node (scaled). This is how both rotate and
+  /// resize take effect, given the plugin's transform limitations.
+  Future<bool> _rebuildPlacement() async {
+    final objects = _objectManager, anchors = _anchorManager;
+    final base = _baseTransform;
+    if (objects == null || anchors == null || base == null) return false;
+    if (_node != null) await objects.removeNode(_node!);
+    if (_anchor != null) await anchors.removeAnchor(_anchor!);
+    _node = null;
+    _anchor = null;
+
+    final anchor = ARPlaneAnchor(
+      transformation: base.clone()..multiply(vm.Matrix4.rotationY(_rotationY)),
+    );
+    if (await anchors.addAnchor(anchor) != true) return false;
+    _anchor = anchor;
+
+    final node = _makeNode();
+    final added = await objects.addNode(node, planeAnchor: anchor);
+    if (added == true) {
+      _node = node;
+      return true;
+    }
+    return false;
+  }
 
   @override
   void dispose() {
@@ -98,25 +128,14 @@ class _ArViewScreenState extends State<ArViewScreen> {
     if (hit == null) return;
 
     try {
-      // One model at a time — clear the previous placement.
-      if (_node != null) objects.removeNode(_node!);
-      if (_anchor != null) anchors.removeAnchor(_anchor!);
-      _node = null;
-      _anchor = null;
-
-      final anchor = ARPlaneAnchor(transformation: hit.worldTransform);
-      if (await anchors.addAnchor(anchor) != true) {
-        _toast("Couldn't anchor here — try another spot.");
-        return;
-      }
-      _anchor = anchor;
-
-      final node = _makeNode();
-      final added = await objects.addNode(node, planeAnchor: anchor);
-      if (added == true && mounted) {
-        _node = node;
+      // Tap (re)places at the new surface point, keeping the current scale +
+      // rotation. The base pose is the hit; our Y rotation is layered on in
+      // _rebuildPlacement.
+      _baseTransform = hit.worldTransform;
+      final ok = await _rebuildPlacement();
+      if (ok && mounted) {
         setState(() => _placed = true);
-      } else {
+      } else if (mounted) {
         _toast("Couldn't place the model here.");
       }
     } catch (_) {
@@ -124,33 +143,20 @@ class _ArViewScreenState extends State<ArViewScreen> {
     }
   }
 
-  /// Re-adds the placed node on the SAME anchor with the current _scale/
-  /// _rotationY (the plugin has no runtime node-transform method).
-  Future<void> _replaceNode() async {
-    final objects = _objectManager, anchor = _anchor;
-    if (!_placed || objects == null || anchor is! ARPlaneAnchor) return;
-    if (_node != null) await objects.removeNode(_node!);
-    final node = _makeNode();
-    final added = await objects.addNode(node, planeAnchor: anchor);
-    if (added == true && mounted) {
-      _node = node;
-      setState(() {});
-    }
-  }
-
   /// Resize the placed model (×factor).
   Future<void> _rescale(double factor) async {
+    if (!_placed) return;
     final next = (_scale * factor).clamp(0.02, 2.0);
     if (next == _scale) return;
     _scale = next;
-    await _replaceNode();
+    if (await _rebuildPlacement() && mounted) setState(() {});
   }
 
-  /// Rotate the placed model about its vertical axis by [deltaRad].
+  /// Rotate the placed model about its vertical (surface) axis by [deltaRad].
   Future<void> _rotate(double deltaRad) async {
     if (!_placed) return;
     _rotationY += deltaRad;
-    await _replaceNode();
+    if (await _rebuildPlacement() && mounted) setState(() {});
   }
 
   void _toast(String message) {
