@@ -46,13 +46,16 @@ class _ArViewScreenState extends State<ArViewScreen> {
   ARNode? _node;
   ARAnchor? _anchor;
   bool _placed = false;
-  double _scale = 0.2; // current placed scale (re-added on +/- since the plugin
-  // has no runtime node-scale method — only addNode/removeNode).
+  double _scale = 0.2; // current placed scale
+  double _rotationY = 0.0; // current placed yaw (radians)
+  // The plugin has no runtime node-transform method (only addNode/removeNode),
+  // so scale + rotation are applied by re-adding the node on the same anchor.
 
-  ARNode _makeNode(double scale) => ARNode(
+  ARNode _makeNode() => ARNode(
         type: NodeType.fileSystemAppFolderGLB,
         uri: 'file://${widget.glbAbsolutePath}',
-        scale: vm.Vector3.all(scale),
+        scale: vm.Vector3.all(_scale),
+        rotation: vm.Vector4(0, 1, 0, _rotationY), // axis-angle about Y
         position: vm.Vector3.zero(),
       );
 
@@ -108,7 +111,7 @@ class _ArViewScreenState extends State<ArViewScreen> {
       }
       _anchor = anchor;
 
-      final node = _makeNode(_scale);
+      final node = _makeNode();
       final added = await objects.addNode(node, planeAnchor: anchor);
       if (added == true && mounted) {
         _node = node;
@@ -121,20 +124,33 @@ class _ArViewScreenState extends State<ArViewScreen> {
     }
   }
 
-  /// Resize the placed model. The plugin can't update a live node's scale, so
-  /// remove it and re-add at the new scale on the SAME anchor (no re-anchor).
-  Future<void> _rescale(double factor) async {
+  /// Re-adds the placed node on the SAME anchor with the current _scale/
+  /// _rotationY (the plugin has no runtime node-transform method).
+  Future<void> _replaceNode() async {
     final objects = _objectManager, anchor = _anchor;
     if (!_placed || objects == null || anchor is! ARPlaneAnchor) return;
-    final next = (_scale * factor).clamp(0.02, 2.0);
-    if (next == _scale) return;
     if (_node != null) await objects.removeNode(_node!);
-    final node = _makeNode(next);
+    final node = _makeNode();
     final added = await objects.addNode(node, planeAnchor: anchor);
     if (added == true && mounted) {
       _node = node;
-      setState(() => _scale = next);
+      setState(() {});
     }
+  }
+
+  /// Resize the placed model (×factor).
+  Future<void> _rescale(double factor) async {
+    final next = (_scale * factor).clamp(0.02, 2.0);
+    if (next == _scale) return;
+    _scale = next;
+    await _replaceNode();
+  }
+
+  /// Rotate the placed model about its vertical axis by [deltaRad].
+  Future<void> _rotate(double deltaRad) async {
+    if (!_placed) return;
+    _rotationY += deltaRad;
+    await _replaceNode();
   }
 
   void _toast(String message) {
@@ -204,7 +220,7 @@ class _ArViewScreenState extends State<ArViewScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Text(
-                    'Drag to move · two fingers to rotate',
+                    'Tap a new spot to move it',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: Colors.white70, fontSize: 12),
                   ),
@@ -212,7 +228,7 @@ class _ArViewScreenState extends State<ArViewScreen> {
                   Center(
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
+                          horizontal: 6, vertical: 4),
                       decoration: BoxDecoration(
                         color: Colors.black.withValues(alpha: 0.6),
                         borderRadius: BorderRadius.circular(28),
@@ -221,18 +237,30 @@ class _ArViewScreenState extends State<ArViewScreen> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           IconButton(
+                            tooltip: 'Rotate left',
+                            color: Colors.white,
+                            onPressed: () => _rotate(-0.5236), // -30°
+                            icon: const Icon(Icons.rotate_left),
+                          ),
+                          IconButton(
                             tooltip: 'Smaller',
                             color: Colors.white,
                             onPressed: () => _rescale(0.8),
                             icon: const Icon(Icons.remove_circle_outline),
                           ),
                           const Icon(Icons.straighten,
-                              color: Colors.white70, size: 18),
+                              color: Colors.white54, size: 16),
                           IconButton(
                             tooltip: 'Bigger',
                             color: Colors.white,
                             onPressed: () => _rescale(1.25),
                             icon: const Icon(Icons.add_circle_outline),
+                          ),
+                          IconButton(
+                            tooltip: 'Rotate right',
+                            color: Colors.white,
+                            onPressed: () => _rotate(0.5236), // +30°
+                            icon: const Icon(Icons.rotate_right),
                           ),
                         ],
                       ),
