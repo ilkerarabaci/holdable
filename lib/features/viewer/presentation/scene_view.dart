@@ -219,12 +219,21 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         _lights.add(e);
       }
       // Filmic tone mapping + a touch of bloom give the render richer, more
-      // natural color/contrast than the raw linear output (the next lighting
-      // step is a real IBL environment). Best-effort: keep going if unsupported.
+      // natural color/contrast than the raw linear output. Best-effort.
       try {
         await viewer.setToneMapper(await ToneMapper.filmic());
         await viewer.setBloom(true, 0.08);
       } catch (_) {/* keep default tone mapping */}
+      // Real image-based lighting: a bundled studio environment gives genuine
+      // soft ambient + reflections on top of the directional rig (the rig still
+      // defines shape; IBL adds realism). Thermion resolves `asset://` paths via
+      // rootBundle. Best-effort — if it fails, the 6-light rig + filmic remain,
+      // so there's no black-screen risk. (Skybox is NOT shown — we keep the
+      // solid background; only the lighting/reflections come from the IBL.)
+      try {
+        await viewer.loadIbl('asset://assets/env/studio_ibl.ktx',
+            intensity: 22000);
+      } catch (_) {/* directional rig remains the only light */}
       final camera = await viewer.getActiveCamera();
       if (!mounted) {
         await viewer.dispose();
