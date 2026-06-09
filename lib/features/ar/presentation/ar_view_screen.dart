@@ -215,61 +215,107 @@ class _ArViewScreenState extends State<ArViewScreen> {
             Positioned(
               left: 12,
               right: 12,
-              bottom: 28,
+              bottom: 96, // lifted clear of the system nav bar / thumb zone
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Text(
                     'Tap a new spot to move it',
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                    style: TextStyle(color: Colors.white70, fontSize: 13),
                   ),
-                  const SizedBox(height: 10),
-                  Center(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.6),
-                        borderRadius: BorderRadius.circular(28),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            tooltip: 'Rotate left',
-                            color: Colors.white,
-                            onPressed: () => _rotate(-0.5236), // -30°
-                            icon: const Icon(Icons.rotate_left),
-                          ),
-                          IconButton(
-                            tooltip: 'Smaller',
-                            color: Colors.white,
-                            onPressed: () => _rescale(0.8),
-                            icon: const Icon(Icons.remove_circle_outline),
-                          ),
-                          const Icon(Icons.straighten,
-                              color: Colors.white54, size: 16),
-                          IconButton(
-                            tooltip: 'Bigger',
-                            color: Colors.white,
-                            onPressed: () => _rescale(1.25),
-                            icon: const Icon(Icons.add_circle_outline),
-                          ),
-                          IconButton(
-                            tooltip: 'Rotate right',
-                            color: Colors.white,
-                            onPressed: () => _rotate(0.5236), // +30°
-                            icon: const Icon(Icons.rotate_right),
-                          ),
-                        ],
-                      ),
-                    ),
+                  const SizedBox(height: 14),
+                  // Two separated groups so rotate and resize don't get mixed up,
+                  // with big touch targets.
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _ArControlGroup(label: 'ROTATE', children: [
+                        _ArBtn(
+                          tooltip: 'Rotate left',
+                          icon: Icons.rotate_left,
+                          onTap: () => _rotate(-0.5236), // -30°
+                        ),
+                        _ArBtn(
+                          tooltip: 'Rotate right',
+                          icon: Icons.rotate_right,
+                          onTap: () => _rotate(0.5236), // +30°
+                        ),
+                      ]),
+                      const SizedBox(width: 22),
+                      _ArControlGroup(label: 'SIZE', children: [
+                        _ArBtn(
+                          tooltip: 'Smaller',
+                          icon: Icons.zoom_out,
+                          onTap: () => _rescale(0.8),
+                        ),
+                        _ArBtn(
+                          tooltip: 'Bigger',
+                          icon: Icons.zoom_in,
+                          onTap: () => _rescale(1.25),
+                        ),
+                      ]),
+                    ],
                   ),
                 ],
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// A labelled pill grouping two AR control buttons.
+class _ArControlGroup extends StatelessWidget {
+  const _ArControlGroup({required this.label, required this.children});
+  final String label;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.62),
+            borderRadius: BorderRadius.circular(34),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: children),
+        ),
+        const SizedBox(height: 4),
+        Text(label,
+            style: const TextStyle(
+                color: Colors.white60,
+                fontSize: 10,
+                letterSpacing: 1.2,
+                fontWeight: FontWeight.w600)),
+      ],
+    );
+  }
+}
+
+/// A large, finger-friendly round AR control button.
+class _ArBtn extends StatelessWidget {
+  const _ArBtn(
+      {required this.tooltip, required this.icon, required this.onTap});
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkResponse(
+        onTap: onTap,
+        radius: 36,
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Icon(icon, color: Colors.white, size: 32),
+        ),
       ),
     );
   }
