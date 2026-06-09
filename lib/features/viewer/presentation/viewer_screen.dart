@@ -220,6 +220,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                   onColor: _scene.setColor,
                   onLightIntensity: _scene.setLightIntensity,
                   onLightAngle: _scene.setLightAngle,
+                  onEnvironment: _scene.setEnvironment,
                 )),
           if (_tab == _Tab.info)
             Positioned(
@@ -417,11 +418,13 @@ class _RenderPanel extends StatefulWidget {
     required this.onColor,
     required this.onLightIntensity,
     required this.onLightAngle,
+    required this.onEnvironment,
   });
   final ValueChanged<String> onMode;
   final ValueChanged<Color> onColor;
   final ValueChanged<double> onLightIntensity;
   final ValueChanged<double> onLightAngle;
+  final ValueChanged<double> onEnvironment;
 
   @override
   State<_RenderPanel> createState() => _RenderPanelState();
@@ -440,6 +443,7 @@ class _RenderPanelState extends State<_RenderPanel> {
   Color _current = _neutral;
   double _intensity = 1.0; // light-rig multiplier (matches scene default)
   double _angle = 0.0; // rig azimuth, radians
+  double _environment = 0.0; // IBL environment amount (0 = off, scene default)
 
   void _pick(Color c) {
     setState(() => _current = c);
@@ -560,6 +564,15 @@ class _RenderPanelState extends State<_RenderPanel> {
               setState(() => _angle = v);
               widget.onLightAngle(v);
             },
+          ),
+          _LightSlider(
+            icon: LucideIcons.globe, // environment / reflections (IBL), 0 = off
+            value: _environment,
+            min: 0.0,
+            max: 1.0,
+            // (Re)loads the IBL — apply on release.
+            onChanged: (v) => setState(() => _environment = v),
+            onChangeEnd: widget.onEnvironment,
           ),
         ],
       ),

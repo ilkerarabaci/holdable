@@ -18,6 +18,7 @@ const kSampleModels = <SampleModel>[
   SampleModel(name: 'Torus (GLB)', asset: 'assets/sample_models/torus.glb'),
   SampleModel(name: 'Sphere (PLY)', asset: 'assets/sample_models/sphere.ply'),
   SampleModel(name: 'Gear (3MF)', asset: 'assets/sample_models/gear.3mf'),
+  SampleModel(name: 'Geosphere (OFF)', asset: 'assets/sample_models/geosphere.off'),
   // Realistic CC0 models (Khronos glTF Sample Assets, public domain), stripped
   // to geometry-only + recolored. See assets/sample_models/CREDITS.md.
   SampleModel(name: 'Teacup', asset: 'assets/sample_models/teapot.glb'),

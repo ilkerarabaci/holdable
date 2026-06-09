@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'gltf_parser.dart';
+import 'off_parser.dart';
 import 'ply_parser.dart';
 import 'threemf_parser.dart';
 
@@ -112,10 +113,12 @@ class ModelParser {
       case '3mf':
       case 'threemf':
         return ThreeMfParser.parse(bytes);
+      case 'off':
+        return OffParser.parse(bytes);
       default:
         throw ModelParseException(
           'Unsupported format ${fmt ?? '(unknown)'} — '
-          'expected obj, stl, glb, gltf, ply or 3mf',
+          'expected obj, stl, glb, gltf, ply, 3mf or off',
         );
     }
   }

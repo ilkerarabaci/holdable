@@ -184,7 +184,7 @@ class _EmptyState extends StatelessWidget {
             Text('Your shelf is empty.',
                 style: t.titleLarge, textAlign: TextAlign.center),
             const SizedBox(height: 8),
-            Text('Drop an .obj, .stl, .glb, .gltf, .ply or .3mf to begin.',
+            Text('Drop an .obj, .stl, .glb, .gltf, .ply, .3mf or .off to begin.',
                 style: t.bodyMedium?.copyWith(color: c.textMuted),
                 textAlign: TextAlign.center),
           ],

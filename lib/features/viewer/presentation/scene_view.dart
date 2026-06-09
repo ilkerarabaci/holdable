@@ -55,6 +55,10 @@ class ModelSceneController {
 
   /// Rotates the whole light rig around Y by [azimuthRad] (relight angle).
   void setLightAngle(double azimuthRad) => _state?._setLightAzimuth(azimuthRad);
+
+  /// Environment (image-based) lighting amount 0..1 (0 = off; reflections +
+  /// soft ambient as it rises).
+  void setEnvironment(double amount) => _state?._setEnvironment(amount);
 }
 
 /// 3D viewer surface — **v0.3, Thermion (Google Filament)**.
@@ -143,6 +147,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   final List<ThermionEntity> _lights = [];
   double _lightIntensity = 1.0;
   double _lightAzimuth = 0.0;
+  bool _iblLoaded = false; // image-based-lighting environment currently active
   bool _rebuilding = false;
   String? _pendingMode; // latest mode requested while a rebuild was in flight
 
@@ -224,16 +229,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         await viewer.setToneMapper(await ToneMapper.filmic());
         await viewer.setBloom(true, 0.08);
       } catch (_) {/* keep default tone mapping */}
-      // Real image-based lighting: a bundled studio environment gives genuine
-      // soft ambient + reflections on top of the directional rig (the rig still
-      // defines shape; IBL adds realism). Thermion resolves `asset://` paths via
-      // rootBundle. Best-effort — if it fails, the 6-light rig + filmic remain,
-      // so there's no black-screen risk. (Skybox is NOT shown — we keep the
-      // solid background; only the lighting/reflections come from the IBL.)
-      try {
-        await viewer.loadIbl('asset://assets/env/studio_ibl.ktx',
-            intensity: 22000);
-      } catch (_) {/* directional rig remains the only light */}
+      // Image-based lighting (bundled studio environment) is OFF by default —
+      // it overexposed the look, and the directional rig + filmic is the better
+      // baseline. The user opts in + dials it via the Render panel's Environment
+      // slider (see _setEnvironment), which loads/removes the IBL on demand.
       final camera = await viewer.getActiveCamera();
       if (!mounted) {
         await viewer.dispose();
@@ -539,6 +538,30 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   Vector3 _rotatedDir(double x, double y, double z, double az) {
     final ca = math.cos(az), sa = math.sin(az);
     return Vector3(x * ca + z * sa, y, -x * sa + z * ca)..normalize();
+  }
+
+  /// Environment (image-based) lighting amount, 0..1. 0 removes the IBL (the
+  /// directional rig + filmic baseline); >0 loads the bundled studio IBL at a
+  /// proportional intensity for reflections + soft ambient. Best-effort. Call on
+  /// release — (re)loading the KTX isn't free.
+  Future<void> _setEnvironment(double amount) async {
+    final v = _viewer;
+    if (v == null) return;
+    final a = amount.clamp(0.0, 1.0);
+    try {
+      if (a <= 0.01) {
+        if (_iblLoaded) {
+          await v.removeIbl();
+          _iblLoaded = false;
+        }
+      } else {
+        // loadIbl replaces any existing IBL (destroyExisting); thermion resolves
+        // asset:// via rootBundle. Map 0..1 → a gentle 0..36000 intensity.
+        await v.loadIbl('asset://assets/env/studio_ibl.ktx',
+            intensity: a * 36000);
+        _iblLoaded = true;
+      }
+    } catch (_) {/* keep the directional rig as the only light */}
   }
 
   /// Re-aims every light for a new rig azimuth (cheap — direction only, no

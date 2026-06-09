@@ -7,6 +7,7 @@ enum ModelFormat {
   glb,
   gltf,
   ply,
+  off,
   // Enum names can't start with a digit, so '3mf' is `threemf`; [label] +
   // [fileExtension] map it back to the real "3mf".
   threemf;
@@ -25,6 +26,7 @@ enum ModelFormat {
       'glb' => ModelFormat.glb,
       'gltf' => ModelFormat.gltf,
       'ply' => ModelFormat.ply,
+      'off' => ModelFormat.off,
       '3mf' => ModelFormat.threemf,
       _ => null,
     };
