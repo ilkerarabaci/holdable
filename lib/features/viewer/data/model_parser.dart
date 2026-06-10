@@ -61,7 +61,13 @@ class MeshData {
     this.indices32,
     this.baseColorArgb,
     this.textureBytes,
+    this.hadAuthoredNormals = true,
   });
+
+  /// Whether the source file carried its own normals. False when the parser
+  /// computed smooth normals as a fallback — the viewer uses this to pick a
+  /// better default shading (small faceted models look crisper flat-shaded).
+  final bool hadAuthoredNormals;
 
   /// Optional model-supplied base color (0xAARRGGBB) — e.g. a glTF material's
   /// baseColorFactor. The viewer uses it as the model's initial color so an
@@ -402,6 +408,7 @@ class ModelParser {
       bounds: b.build(),
       indices16: i16,
       indices32: i32,
+      hadAuthoredNormals: fileHadNormals,
     );
   }
 

@@ -145,6 +145,7 @@ class OffParser {
     }
 
     return MeshData(
+      hadAuthoredNormals: false,
       vertices: out,
       vertexCount: nVerts,
       triangleCount: indices.length ~/ 3,

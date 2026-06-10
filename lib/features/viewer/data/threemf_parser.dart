@@ -127,6 +127,7 @@ class ThreeMfParser {
     }
 
     return MeshData(
+      hadAuthoredNormals: false,
       vertices: out,
       vertexCount: vc,
       triangleCount: indices.length ~/ 3,

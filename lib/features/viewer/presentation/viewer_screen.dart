@@ -219,6 +219,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                 child: _RenderPanel(
                   onMode: _scene.setRenderMode,
                   onColor: _scene.setColor,
+                  onShading: _scene.setShading,
                   onTexture: _scene.setTextureAsset,
                   onLightIntensity: _scene.setLightIntensity,
                   onLightAngle: _scene.setLightAngle,
@@ -302,12 +303,16 @@ class _Toolbar extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
             _ToolButton(icon: LucideIcons.move3d, label: 'View',
+                tooltip: 'Camera angles (front/top/side/iso)',
                 active: current == _Tab.view, onTap: () => onSelect(_Tab.view)),
             _ToolButton(icon: LucideIcons.palette, label: 'Render',
+                tooltip: 'Mode, shading, color, texture & light',
                 active: current == _Tab.render, onTap: () => onSelect(_Tab.render)),
             _ToolButton(icon: LucideIcons.info, label: 'Info',
+                tooltip: 'Model stats & memory',
                 active: current == _Tab.info, onTap: () => onSelect(_Tab.info)),
-            _ToolButton(icon: LucideIcons.scan, label: 'AR', onTap: onAr),
+            _ToolButton(icon: LucideIcons.scan, label: 'AR',
+                tooltip: 'Place the model in your room', onTap: onAr),
           ],
         ),
       ),
@@ -321,17 +326,21 @@ class _ToolButton extends StatelessWidget {
     required this.label,
     this.active = false,
     this.onTap,
+    this.tooltip,
   });
   final IconData icon;
   final String label;
   final bool active;
   final VoidCallback? onTap;
 
+  /// One-line hint shown on long-press.
+  final String? tooltip;
+
   @override
   Widget build(BuildContext context) {
     final c = context.prism;
     final color = active ? PrismGradient.violet : c.textPrimary;
-    return InkWell(
+    final button = InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
       child: Padding(
@@ -346,6 +355,8 @@ class _ToolButton extends StatelessWidget {
         ),
       ),
     );
+    if (tooltip == null) return button;
+    return Tooltip(message: tooltip!, child: button);
   }
 }
 
@@ -379,13 +390,17 @@ class _Panel extends StatelessWidget {
 }
 
 class _Chip extends StatelessWidget {
-  const _Chip({required this.label, required this.onTap});
+  const _Chip({required this.label, required this.onTap, this.tooltip});
   final String label;
   final VoidCallback onTap;
+
+  /// One-line hint, shown on long-press (standard Flutter tooltip behavior,
+  /// so a normal tap still triggers the action).
+  final String? tooltip;
   @override
   Widget build(BuildContext context) {
     final c = context.prism;
-    return OutlinedButton(
+    final button = OutlinedButton(
       onPressed: onTap,
       style: OutlinedButton.styleFrom(
         foregroundColor: c.textPrimary,
@@ -394,6 +409,8 @@ class _Chip extends StatelessWidget {
       ),
       child: Text(label),
     );
+    if (tooltip == null) return button;
+    return Tooltip(message: tooltip!, child: button);
   }
 }
 
@@ -405,10 +422,22 @@ class _PresetPanel extends StatelessWidget {
     return _Panel(
       label: 'VIEW',
       child: Wrap(spacing: 10, children: [
-        _Chip(label: 'Front', onTap: () => onView('front')),
-        _Chip(label: 'Top', onTap: () => onView('top')),
-        _Chip(label: 'Side', onTap: () => onView('side')),
-        _Chip(label: 'Iso', onTap: () => onView('iso')),
+        _Chip(
+            label: 'Front',
+            tooltip: 'Look straight at the front',
+            onTap: () => onView('front')),
+        _Chip(
+            label: 'Top',
+            tooltip: 'Look down from above',
+            onTap: () => onView('top')),
+        _Chip(
+            label: 'Side',
+            tooltip: 'Look from the side',
+            onTap: () => onView('side')),
+        _Chip(
+            label: 'Iso',
+            tooltip: 'Three-quarter view (default)',
+            onTap: () => onView('iso')),
       ]),
     );
   }
@@ -419,12 +448,16 @@ class _RenderPanel extends StatefulWidget {
     required this.onMode,
     required this.onColor,
     required this.onTexture,
+    required this.onShading,
     required this.onLightIntensity,
     required this.onLightAngle,
     required this.onEnvironment,
   });
   final ValueChanged<String> onMode;
   final ValueChanged<Color> onColor;
+
+  /// Shading preference: 'auto', 'smooth' or 'flat'.
+  final ValueChanged<String> onShading;
 
   /// Bundled texture asset path, or null for "None" (back to flat color).
   final ValueChanged<String?> onTexture;
@@ -528,9 +561,40 @@ class _RenderPanelState extends State<_RenderPanel> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Wrap(spacing: 10, children: [
-            _Chip(label: 'Solid', onTap: () => widget.onMode('solid')),
-            _Chip(label: 'Wireframe', onTap: () => widget.onMode('wireframe')),
-            _Chip(label: 'X-ray', onTap: () => widget.onMode('xray')),
+            _Chip(
+                label: 'Solid',
+                tooltip: 'Filled surfaces (default)',
+                onTap: () => widget.onMode('solid')),
+            _Chip(
+                label: 'Wireframe',
+                tooltip: 'Edges only — see the mesh structure',
+                onTap: () => widget.onMode('wireframe')),
+            _Chip(
+                label: 'X-ray',
+                tooltip: 'See-through surfaces',
+                onTap: () => widget.onMode('xray')),
+          ]),
+          const SizedBox(height: 14),
+          Text('SHADING',
+              style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  letterSpacing: 1,
+                  color: c.textMuted)),
+          const SizedBox(height: 10),
+          Wrap(spacing: 10, children: [
+            _Chip(
+                label: 'Auto',
+                tooltip: 'Picks smooth or faceted per model (default)',
+                onTap: () => widget.onShading('auto')),
+            _Chip(
+                label: 'Smooth',
+                tooltip: 'Rounded look — blends across facets',
+                onTap: () => widget.onShading('smooth')),
+            _Chip(
+                label: 'Flat',
+                tooltip: 'Crisp facets — low-poly look',
+                onTap: () => widget.onShading('flat')),
           ]),
           const SizedBox(height: 14),
           Text('COLOR',
@@ -541,9 +605,10 @@ class _RenderPanelState extends State<_RenderPanel> {
                   color: c.textMuted)),
           const SizedBox(height: 10),
           Row(children: [
-            for (final color in _quick)
+            for (final (i, color) in _quick.indexed)
               _Swatch(
                 color: color,
+                tooltip: const ['Neutral', 'Pink', 'Violet', 'Cyan'][i],
                 selected: color.toARGB32() == _current.toARGB32(),
                 onTap: () => _pick(color),
               ),
@@ -681,7 +746,9 @@ class _CustomSwatch extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.prism;
-    return InkWell(
+    return Tooltip(
+      message: 'Custom color…',
+      child: InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(999),
       child: Container(
@@ -703,7 +770,9 @@ class _CustomSwatch extends StatelessWidget {
             width: selected ? 2 : 1,
           ),
         ),
-        child: Icon(Icons.add, size: 16, color: Colors.white.withValues(alpha: 0.9)),
+        child: Icon(Icons.add,
+            size: 16, color: Colors.white.withValues(alpha: 0.9)),
+      ),
       ),
     );
   }
@@ -787,16 +856,20 @@ class _NoneSwatch extends StatelessWidget {
 
 class _Swatch extends StatelessWidget {
   const _Swatch(
-      {required this.color, required this.onTap, this.selected = false});
+      {required this.color,
+      required this.onTap,
+      this.selected = false,
+      this.tooltip});
   final Color color;
   final VoidCallback onTap;
   final bool selected;
+
+  /// One-line hint (the colour's name) shown on long-press.
+  final String? tooltip;
   @override
   Widget build(BuildContext context) {
     final c = context.prism;
-    return Padding(
-      padding: const EdgeInsets.only(right: 12),
-      child: InkWell(
+    Widget body = InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(999),
         child: Container(
@@ -811,8 +884,9 @@ class _Swatch extends StatelessWidget {
             ),
           ),
         ),
-      ),
-    );
+      );
+    if (tooltip != null) body = Tooltip(message: tooltip!, child: body);
+    return Padding(padding: const EdgeInsets.only(right: 12), child: body);
   }
 }
 

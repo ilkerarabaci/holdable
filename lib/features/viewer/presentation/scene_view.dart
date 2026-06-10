@@ -66,6 +66,19 @@ class ModelSceneController {
   /// base color drives the surface again).
   void setTextureAsset(String? assetPath) =>
       _state?._setTextureAsset(assetPath);
+
+  /// Shading preference: 'auto' (default), 'smooth' or 'flat' facets.
+  void setShading(String shading) => _state?._setShading(shading);
+}
+
+/// De-indexed flat-shaded copy of a prepared model (per-face normals).
+class _FlatModel {
+  _FlatModel(this.positions, this.normals, this.uvs, this.indices, this.indexType);
+  final Float32List positions;
+  final Float32List normals;
+  final Float32List uvs;
+  final List<int> indices;
+  final IndexType indexType;
 }
 
 /// 3D viewer surface — **v0.3, Thermion (Google Filament)**.
@@ -135,6 +148,20 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   /// Triangle-edge index buffer for wireframe, built lazily from [_model].
   List<int>? _lineIndices;
 
+  /// De-indexed flat-shaded (per-face normal) copy of [_model], built lazily
+  /// when flat shading is in effect. See [_effectiveFlat].
+  _FlatModel? _flatModel;
+
+  /// Shading preference: 'auto' (default), 'smooth', 'flat'. Auto flat-shades
+  /// small models whose file carried no normals (e.g. a 320-tri geosphere —
+  /// smooth-shading those makes a soft blob with a polygonal silhouette;
+  /// crisp facets match the look of the CPU-rasterized library thumbnail).
+  String _shading = 'auto';
+
+  /// Hard cap for flat shading: de-indexing triples vertex data, so very large
+  /// models stay smooth even if the user asks for flat.
+  static const int _flatMaxTris = 300000;
+
   bool _viewerReady = false;
   bool _hasModel = false;
   bool _thumbCaptured = false; // one thumbnail per model load
@@ -150,12 +177,16 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   Color _baseColor = _kNeutral;
   double _currentAlpha = 1.0; // 0.35 in x-ray
 
-  // --- Texture state (decoded RGBA, uploaded lazily into a Filament texture).
-  // The decoded pixels are retained so render-mode rebuilds (new material) can
-  // re-apply the texture without re-decoding. All GPU texture work is
-  // best-effort: a failure leaves the model on its plain base color.
-  Uint8List? _texRgba;
-  int _texWidth = 0, _texHeight = 0;
+  // --- Texture state. The ENCODED image (PNG/JPEG bytes) is retained so
+  // render-mode rebuilds (new material) can re-apply the texture; decoding
+  // happens natively on Filament's render thread via FilamentApp.decodeImage +
+  // Texture.setLinearImage — the exact path thermion's own tests exercise.
+  // (The first attempt used Texture.setImage, which crashed the app on device:
+  // that FFI passes the PixelDataFormat/Type enum .index where native expects
+  // .value, so the pixel format arrived garbled — a native abort no Dart
+  // try/catch can stop.) All GPU texture work is still best-effort: a failure
+  // leaves the model on its plain base color.
+  Uint8List? _texEncoded;
   Texture? _texture; // current Filament texture (one at a time)
   TextureSampler? _texSampler; // shared REPEAT/LINEAR sampler, created once
   // Adjustable light rig (see _kLightRig): stored entities + the user's
@@ -288,6 +319,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       if (!mounted) return;
       _model = prepared;
       _lineIndices = null; // invalidate the previous model's wireframe cache
+      _flatModel = null; // and its flat-shading cache
       _thumbCaptured = false;
       // Show the model in its own colour if it carries one (e.g. a glTF
       // material). The user can still re-pick from the Render panel.
@@ -296,16 +328,11 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       }
       // Texture state belongs to one model: drop the previous model's texture
       // (destroyed after the rebuild below replaces the material that samples
-      // it), and pre-decode this model's own embedded texture if it has one
-      // (e.g. a textured GLB) so the rebuild binds it.
+      // it), and adopt this model's own embedded texture if it has one (e.g. a
+      // textured GLB) so the rebuild binds it.
       final staleTex = _texture;
       _texture = null;
-      _texRgba = null;
-      _texWidth = 0;
-      _texHeight = 0;
-      if (prepared.textureBytes != null) {
-        await _decodeTexture(prepared.textureBytes!);
-      }
+      _texEncoded = prepared.textureBytes;
       if (_viewerReady) await _applyMode(_mode, frame: true);
       if (staleTex != null) {
         try {
@@ -364,6 +391,15 @@ class _ModelSceneViewState extends State<ModelSceneView> {
           primitiveType: PrimitiveType.LINES,
           indexType: p.indexType,
         );
+      } else if (_effectiveFlat(p)) {
+        final flat = _flatModel ??= _buildFlatModel(p);
+        geometry = Geometry(
+          flat.positions,
+          flat.indices,
+          normals: flat.normals,
+          uvs: flat.uvs,
+          indexType: flat.indexType,
+        );
       } else {
         geometry = Geometry(
           p.positions,
@@ -389,7 +425,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       await _applyColorTo(material);
       // Re-bind the active texture to the fresh material (solid/x-ray only —
       // wireframe lines have no meaningful surface to texture).
-      if (!wireframe && _texRgba != null) await _applyTextureTo(material);
+      if (!wireframe && _texEncoded != null) await _applyTextureTo(material);
 
       final asset = await viewer.createGeometry(
         geometry,
@@ -563,7 +599,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   /// While a texture is active (and shown — not in wireframe) the factor is
   /// white so the texture's own colors come through unmultiplied.
   Future<void> _applyColorTo(MaterialInstance mi) async {
-    final textured = _texRgba != null && _mode != 'wireframe';
+    final textured = _texEncoded != null && _mode != 'wireframe';
     await mi.setParameterFloat4(
       'baseColorFactor',
       textured ? 1.0 : _srgbToLinear(_baseColor.r),
@@ -577,7 +613,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     _baseColor = color;
     // Picking a color switches the surface back to flat color (texture off) —
     // baseColorFactor and baseColorMap are mutually exclusive in the UI.
-    if (_texRgba != null) {
+    if (_texEncoded != null) {
       await _clearTexture();
       return;
     }
@@ -652,13 +688,91 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     _applyMode(mode);
   }
 
+  // --- Shading (smooth vs flat facets) --------------------------------------
+
+  /// Whether the current asset should render flat-shaded.
+  bool _effectiveFlat(_PreparedModel p) {
+    if (p.triangleCount > _flatMaxTris) return false;
+    return switch (_shading) {
+      'flat' => true,
+      'smooth' => false,
+      // Auto: small models without authored normals read better faceted.
+      _ => !p.hadAuthoredNormals && p.triangleCount <= 1000,
+    };
+  }
+
+  void _setShading(String shading) {
+    if (shading == _shading) return;
+    _shading = shading;
+    _applyMode(_mode); // rebuild the asset with the new normals
+  }
+
+  /// De-indexes [p] into per-corner buffers with per-face normals.
+  _FlatModel _buildFlatModel(_PreparedModel p) {
+    final tris = p.indices.length ~/ 3;
+    final n = tris * 3;
+    final positions = Float32List(n * 3);
+    final normals = Float32List(n * 3);
+    final uvs = Float32List(n * 2);
+    for (var t = 0; t < tris; t++) {
+      final a = p.indices[t * 3], b = p.indices[t * 3 + 1], c = p.indices[t * 3 + 2];
+      // Face normal from the triangle's winding.
+      final ax = p.positions[a * 3], ay = p.positions[a * 3 + 1], az = p.positions[a * 3 + 2];
+      final bx = p.positions[b * 3], by = p.positions[b * 3 + 1], bz = p.positions[b * 3 + 2];
+      final cx = p.positions[c * 3], cy = p.positions[c * 3 + 1], cz = p.positions[c * 3 + 2];
+      final ux = bx - ax, uy = by - ay, uz = bz - az;
+      final vx = cx - ax, vy = cy - ay, vz = cz - az;
+      var nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      final len = math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (len > 1e-12) {
+        nx /= len;
+        ny /= len;
+        nz /= len;
+      } else {
+        nz = 1.0;
+      }
+      for (var k = 0; k < 3; k++) {
+        final src = [a, b, c][k];
+        final dst = t * 3 + k;
+        positions[dst * 3] = p.positions[src * 3];
+        positions[dst * 3 + 1] = p.positions[src * 3 + 1];
+        positions[dst * 3 + 2] = p.positions[src * 3 + 2];
+        normals[dst * 3] = nx;
+        normals[dst * 3 + 1] = ny;
+        normals[dst * 3 + 2] = nz;
+        uvs[dst * 2] = p.uvs[src * 2];
+        uvs[dst * 2 + 1] = p.uvs[src * 2 + 1];
+      }
+    }
+    final List<int> indices;
+    final IndexType indexType;
+    if (n <= 0x10000) {
+      final i16 = Uint16List(n);
+      for (var i = 0; i < n; i++) {
+        i16[i] = i;
+      }
+      indices = i16;
+      indexType = IndexType.USHORT;
+    } else {
+      final i32 = Uint32List(n);
+      for (var i = 0; i < n; i++) {
+        i32[i] = i;
+      }
+      indices = i32;
+      indexType = IndexType.UINT;
+    }
+    return _FlatModel(positions, normals, uvs, indices, indexType);
+  }
+
   // --- Texture (parametric surface texture on any model) --------------------
   //
   // The encoded image (bundled asset or a glTF's embedded base-color texture)
-  // is decoded to RGBA on the UI isolate, uploaded into a Filament sRGB
-  // texture and bound to the ubershader's baseColorMap (enabled by pointing
-  // baseColorIndex at UV set 0). Every step is best-effort: any failure leaves
-  // the model rendering with its plain base color — never black, never a crash.
+  // is decoded NATIVELY on Filament's render thread (FilamentApp.decodeImage →
+  // LinearImage) and uploaded via Texture.setLinearImage — the path thermion's
+  // own test-suite exercises. The texture is bound to the ubershader's
+  // baseColorMap (enabled by pointing baseColorIndex at UV set 0). Every step
+  // is best-effort: any failure leaves the model rendering with its plain base
+  // color — never black.
 
   Future<void> _setTextureAsset(String? assetPath) async {
     if (assetPath == null) {
@@ -671,10 +785,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     } catch (_) {/* asset missing/undecodable — keep the current look */}
   }
 
-  /// Decodes [encoded] (PNG/JPEG) and swaps it in as the active texture.
+  /// Swaps [encoded] (PNG/JPEG bytes) in as the active texture.
   Future<void> _applyTextureBytes(Uint8List encoded) async {
     final old = _texture;
-    if (!await _decodeTexture(encoded)) return;
+    _texEncoded = encoded;
     _texture = null; // force a fresh GPU texture for the new pixels
     final mi = _material;
     if (mi != null) await _applyTextureTo(mi);
@@ -690,9 +804,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   /// material (baseColorIndex = -1), restores the base color, then frees the
   /// GPU texture.
   Future<void> _clearTexture() async {
-    _texRgba = null;
-    _texWidth = 0;
-    _texHeight = 0;
+    _texEncoded = null;
     final mi = _material;
     final old = _texture;
     _texture = null;
@@ -709,39 +821,16 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     }
   }
 
-  /// Decodes PNG/JPEG bytes into [_texRgba] (straight RGBA8888).
-  Future<bool> _decodeTexture(Uint8List encoded) async {
-    try {
-      final codec = await ui.instantiateImageCodec(encoded);
-      final frame = await codec.getNextFrame();
-      final img = frame.image;
-      final data =
-          await img.toByteData(format: ui.ImageByteFormat.rawStraightRgba);
-      final w = img.width, h = img.height;
-      img.dispose();
-      codec.dispose();
-      if (data == null || w <= 0 || h <= 0) return false;
-      _texRgba = data.buffer.asUint8List();
-      _texWidth = w;
-      _texHeight = h;
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  /// Binds the decoded texture to [mi], creating the GPU texture on demand.
+  /// Binds the active texture to [mi], creating the GPU texture on demand.
   Future<void> _applyTextureTo(MaterialInstance mi) async {
-    final rgba = _texRgba;
+    final encoded = _texEncoded;
     final app = FilamentApp.instance;
-    if (rgba == null || app == null) return;
+    if (encoded == null || app == null) return;
     try {
       var tex = _texture;
-      tex ??= _texture = await _createGpuTexture(rgba, _texWidth, _texHeight);
+      tex ??= _texture = await _createGpuTexture(encoded);
       if (tex == null) return;
       _texSampler ??= await app.createTextureSampler(
-        minFilter: TextureMinFilter.LINEAR_MIPMAP_LINEAR,
-        magFilter: TextureMagFilter.LINEAR,
         wrapS: TextureWrapMode.REPEAT,
         wrapT: TextureWrapMode.REPEAT,
       );
@@ -752,52 +841,43 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     } catch (_) {/* model stays plain-colored */}
   }
 
-  /// Uploads RGBA pixels into a new sRGB Filament texture — mipmapped when the
-  /// device allows the blit-capable allocation, single-level otherwise.
-  Future<Texture?> _createGpuTexture(Uint8List rgba, int w, int h) async {
+  /// Decodes [encoded] natively and uploads it into a linear float texture
+  /// (RGBA32F / RGB32F to match the decoded channel count) — mirrors
+  /// thermion's `LinearImage.decodeToTexture` helper, with cleanup.
+  Future<Texture?> _createGpuTexture(Uint8List encoded) async {
     final app = FilamentApp.instance!;
-    var levels = 1;
-    var maxDim = math.max(w, h);
-    while (maxDim > 1) {
-      levels++;
-      maxDim >>= 1;
-    }
+    LinearImage? image;
     try {
+      image = await app.decodeImage(encoded);
+      final w = await image.getWidth();
+      final h = await image.getHeight();
+      final channels = await image.getChannels();
+      if (w <= 0 || h <= 0) return null;
+      final rgba = channels >= 4;
       final tex = await app.createTexture(
         w,
         h,
-        levels: levels,
-        flags: {
-          TextureUsage.TEXTURE_USAGE_SAMPLEABLE,
-          TextureUsage.TEXTURE_USAGE_UPLOADABLE,
-          TextureUsage.TEXTURE_USAGE_BLIT_SRC,
-          TextureUsage.TEXTURE_USAGE_BLIT_DST,
-        },
-        textureFormat: TextureFormat.SRGB8_A8,
+        textureFormat: rgba ? TextureFormat.RGBA32F : TextureFormat.RGB32F,
       );
       try {
-        await tex.setImage(
-            0, rgba, w, h, PixelDataFormat.RGBA, PixelDataType.UBYTE);
-        await tex.generateMipmaps();
+        await tex.setLinearImage(
+          image,
+          rgba ? PixelDataFormat.RGBA : PixelDataFormat.RGB,
+          PixelDataType.FLOAT,
+        );
         return tex;
       } catch (_) {
         try {
           await tex.destroy();
         } catch (_) {}
-        rethrow;
+        return null;
       }
-    } catch (_) {/* fall through to the single-level path */}
-    try {
-      final tex = await app.createTexture(
-        w,
-        h,
-        textureFormat: TextureFormat.SRGB8_A8,
-      );
-      await tex.setImage(
-          0, rgba, w, h, PixelDataFormat.RGBA, PixelDataType.UBYTE);
-      return tex;
     } catch (_) {
       return null;
+    } finally {
+      try {
+        await image?.destroy();
+      } catch (_) {}
     }
   }
 
@@ -893,7 +973,12 @@ class _PreparedModel {
     this.thumbSize = 0,
     this.baseColorArgb,
     this.textureBytes,
+    this.hadAuthoredNormals = true,
   });
+
+  /// Whether the file carried its own normals (false = parser smooth-computed
+  /// them); drives the auto shading default (see _effectiveFlat).
+  final bool hadAuthoredNormals;
 
   /// Model-supplied base colour (e.g. a glTF material) used as the initial color.
   final int? baseColorArgb;
@@ -1052,5 +1137,6 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
     thumbSize: req.thumbSize,
     baseColorArgb: mesh.baseColorArgb,
     textureBytes: mesh.textureBytes,
+    hadAuthoredNormals: mesh.hadAuthoredNormals,
   );
 }

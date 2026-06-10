@@ -131,6 +131,7 @@ class GltfParser {
     final verts = <double>[]; // interleaved 12-float
     final indices = <int>[];
     var vertexOffset = 0;
+    var anyComputedNormals = false;
     final b = _BoundsAccumulator();
     final materials = (gltf['materials'] as List?) ?? const [];
     final textures = (gltf['textures'] as List?) ?? const [];
@@ -245,6 +246,7 @@ class GltfParser {
         }
       } else {
         normals = _smoothNormals(wpos, localIdx, vCount);
+        anyComputedNormals = true;
       }
 
       for (var i = 0; i < vCount; i++) {
@@ -304,6 +306,7 @@ class GltfParser {
       indices32: Uint32List.fromList(indices),
       baseColorArgb: firstColorArgb,
       textureBytes: textureBytes,
+      hadAuthoredNormals: !anyComputedNormals,
     );
   }
 

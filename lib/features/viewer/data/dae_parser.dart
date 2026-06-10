@@ -252,6 +252,7 @@ class DaeParser {
     }
 
     return MeshData(
+      hadAuthoredNormals: anyAuthoredNormal,
       vertices: out,
       vertexCount: vertCount,
       triangleCount: indices.length ~/ 3,

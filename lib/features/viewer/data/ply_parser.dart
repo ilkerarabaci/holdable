@@ -207,6 +207,7 @@ class PlyParser {
     }
 
     return MeshData(
+      hadAuthoredNormals: hasNormalsIdx != null,
       vertices: out,
       vertexCount: vc,
       triangleCount: triCount,
