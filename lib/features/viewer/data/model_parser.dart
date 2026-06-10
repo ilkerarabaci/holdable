@@ -1,9 +1,12 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'dae_parser.dart';
+import 'fbx_parser.dart';
 import 'gltf_parser.dart';
 import 'off_parser.dart';
 import 'ply_parser.dart';
+import 'threeds_parser.dart';
 import 'threemf_parser.dart';
 
 /// Parsing of `.obj` / `.stl` / `.glb` / `.gltf` / `.ply` model files into mesh data.
@@ -121,10 +124,17 @@ class ModelParser {
         return ThreeMfParser.parse(bytes);
       case 'off':
         return OffParser.parse(bytes);
+      case 'dae':
+        return DaeParser.parse(bytes);
+      case '3ds':
+      case 'threeds':
+        return ThreeDsParser.parse(bytes);
+      case 'fbx':
+        return FbxParser.parse(bytes);
       default:
         throw ModelParseException(
           'Unsupported format ${fmt ?? '(unknown)'} — '
-          'expected obj, stl, glb, gltf, ply, 3mf or off',
+          'expected obj, stl, glb, gltf, ply, 3mf, off, dae, 3ds or fbx',
         );
     }
   }
