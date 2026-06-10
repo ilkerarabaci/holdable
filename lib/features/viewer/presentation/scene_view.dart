@@ -8,6 +8,7 @@ import 'package:flutter/services.dart' show rootBundle;
 // Hide Flutter's View/Texture so Thermion's same-named types resolve without a
 // name clash (we don't use Flutter's View/Texture widgets in this file).
 import 'package:flutter/widgets.dart' hide View, Texture;
+import 'package:path_provider/path_provider.dart';
 // Thermion re-exports thermion_dart (ThermionFlutterPlugin, ThermionViewer,
 // Geometry, FilamentApp, DirectLight, Camera, View, RenderTarget, the
 // material/culling/index enums), vector_math_64 (Vector3, Matrix4) and
@@ -107,7 +108,12 @@ class ModelSceneView extends StatefulWidget {
     required this.background,
     required this.onStatus,
     this.onThumbnail,
+    this.onTextureCrashDetected,
   });
+
+  /// Called once when a previous session died mid-texture-pipeline; the value
+  /// is the last step that started (read from the crash-trace file).
+  final ValueChanged<String>? onTextureCrashDetected;
 
   final ModelSceneController controller;
   final String filePath;
@@ -192,6 +198,40 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   Uint8List? _texEncoded;
   Texture? _texture; // current Filament texture (one at a time)
   TextureSampler? _texSampler; // shared REPEAT/LINEAR sampler, created once
+
+  // Crash-resilient texture-pipeline trace: each native step is written
+  // (synchronously, flushed) to a small file BEFORE it runs and the file ends
+  // at 'done' on success. If the app dies inside a native call (uncatchable
+  // abort), the file names the killer step on the next launch — the
+  // share-debug pattern that solved the alpha.13 bug in one device round.
+  String? _traceDir;
+  Future<void>? _traceInit;
+  String? _texCrashStep; // step a previous session died on (skip auto-apply)
+
+  Future<void> _initTrace() => _traceInit ??= () async {
+        try {
+          final dir = await getApplicationDocumentsDirectory();
+          _traceDir = dir.path;
+          final f = File('${dir.path}/texture_trace.txt');
+          if (f.existsSync()) {
+            final c = f.readAsStringSync().trim();
+            if (c.isNotEmpty && c != 'done') {
+              _texCrashStep = c;
+              widget.onTextureCrashDetected?.call(c);
+              // Re-arm for the next session; this one skips auto-apply.
+              f.writeAsStringSync('done', flush: true);
+            }
+          }
+        } catch (_) {/* tracing is best-effort */}
+      }();
+
+  void _trace(String step) {
+    final d = _traceDir;
+    if (d == null) return;
+    try {
+      File('$d/texture_trace.txt').writeAsStringSync(step, flush: true);
+    } catch (_) {}
+  }
   // Adjustable light rig (see _kLightRig): stored entities + the user's
   // intensity multiplier and azimuth rotation (radians, around Y).
   final List<ThermionEntity> _lights = [];
@@ -335,7 +375,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       // textured GLB) so the rebuild binds it.
       final staleTex = _texture;
       _texture = null;
-      _texEncoded = prepared.textureBytes;
+      await _initTrace();
+      // Skip the embedded-texture auto-apply if a previous session died in the
+      // texture pipeline (crash-loop protection) — the model still opens plain.
+      _texEncoded = _texCrashStep == null ? prepared.textureBytes : null;
       if (_viewerReady) await _applyMode(_mode, frame: true);
       if (staleTex != null) {
         try {
@@ -421,14 +464,18 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       // material is created, and binding happens on the matching variant.
       Texture? tex;
       if (!wireframe && _texEncoded != null) {
+        await _initTrace();
         try {
           tex = _texture ??= await _createGpuTexture(_texEncoded!);
         } catch (_) {/* fall back to the untextured variant */}
+        // A graceful (caught) failure is not a crash — close the trace.
+        if (tex == null) _trace('done');
       }
       final bool textured = tex != null;
 
       // Material: lit ubershader for solid, blended for x-ray, unlit for the
       // wireframe (line shading is meaningless).
+      if (textured) _trace('createUbershaderMaterialInstance(textured)');
       final material = await FilamentApp.instance!.createUbershaderMaterialInstance(
         unlit: wireframe,
         alphaMode: xray ? AlphaMode.BLEND : AlphaMode.OPAQUE,
@@ -443,14 +490,20 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       if (xray) await material.setTransparencyMode(TransparencyMode.DEFAULT);
       if (textured) {
         try {
+          _trace('createTextureSampler');
           _texSampler ??= await FilamentApp.instance!.createTextureSampler(
             wrapS: TextureWrapMode.REPEAT,
             wrapT: TextureWrapMode.REPEAT,
           );
           final uber = UbershaderMaterialInstance(material);
+          _trace('setBaseColorTexture');
           await uber.setBaseColorTexture(tex, _texSampler!);
+          _trace('setBaseColorUV');
           await uber.setBaseColorUV(0); // sample baseColorMap with UV set 0
-        } catch (_) {/* variant has the params; binding is best-effort anyway */}
+          _trace('done');
+        } catch (_) {
+          _trace('done'); // caught — not a crash
+        }
       }
       await _applyColorTo(material);
 
@@ -850,18 +903,22 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     final app = FilamentApp.instance!;
     LinearImage? image;
     try {
+      _trace('decodeImage');
       image = await app.decodeImage(encoded);
+      _trace('getImageDimensions');
       final w = await image.getWidth();
       final h = await image.getHeight();
       final channels = await image.getChannels();
       if (w <= 0 || h <= 0) return null;
       final rgba = channels >= 4;
+      _trace('createTexture');
       final tex = await app.createTexture(
         w,
         h,
         textureFormat: rgba ? TextureFormat.RGBA32F : TextureFormat.RGB32F,
       );
       try {
+        _trace('setLinearImage');
         await tex.setLinearImage(
           image,
           rgba ? PixelDataFormat.RGBA : PixelDataFormat.RGB,
@@ -878,6 +935,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       return null;
     } finally {
       try {
+        _trace('destroyLinearImage');
         await image?.destroy();
       } catch (_) {}
     }

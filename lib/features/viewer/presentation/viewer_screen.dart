@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -85,7 +86,18 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   }
 
   void _onStatus(ModelSceneStatus status) {
-    if (mounted) setState(() => _status = status);
+    if (!mounted) return;
+    // The scene reports status synchronously from its initState (i.e. during
+    // this screen's build) — setState would throw "called during build" and
+    // kill the model load before it starts. Defer to the end of the frame.
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() => _status = status);
+      });
+    } else {
+      setState(() => _status = status);
+    }
   }
 
   /// Persists the PNG thumbnail captured by the scene view.
@@ -123,6 +135,31 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     await navigator.push(MaterialPageRoute<void>(
       builder: (_) => ArViewScreen(glbAbsolutePath: name, title: _model.name),
     ));
+  }
+
+  /// Diagnostic: a previous session died inside the texture pipeline; show
+  /// WHICH native step so the failing call can be pinpointed from a device
+  /// screenshot (crash-trace file, see scene_view). Auto-texture is skipped
+  /// for this session as crash-loop protection.
+  void _showTextureCrashStep(String step) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Texture diagnostic'),
+          content: Text(
+              'Last session crashed in the texture pipeline at step:\n\n'
+              '$step\n\n'
+              'Texture auto-apply is off for this session. Please screenshot this.'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('OK')),
+          ],
+        ),
+      );
+    });
   }
 
   /// Loads a different model into the existing scene (prev/next nav).
@@ -183,6 +220,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
               background: c.bg,
               onStatus: _onStatus,
               onThumbnail: _saveThumbnail,
+              onTextureCrashDetected: _showTextureCrashStep,
             ),
           ),
           if (_status.loading && _status.error == null)
