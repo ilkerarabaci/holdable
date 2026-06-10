@@ -196,6 +196,7 @@ class ThreeDsParser {
     }
 
     return MeshData(
+      hadAuthoredNormals: false,
       vertices: out,
       vertexCount: vertCount,
       triangleCount: indices.length ~/ 3,
