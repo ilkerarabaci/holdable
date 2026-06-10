@@ -132,7 +132,9 @@ void main() {
   testWidgets('returning user lands on empty library', (tester) async {
     await _pumpApp(tester, {'onboarding_shown': true});
     expect(find.text('Your shelf is empty.'), findsOneWidget);
-    expect(find.text('Drop an .obj, .stl, .glb, .gltf, .ply, .3mf or .off to begin.'),
+    expect(
+        find.text('Drop an .obj, .stl, .glb, .gltf, .ply,\n'
+            '.3mf, .off, .dae, .3ds or .fbx to begin.'),
         findsOneWidget);
   });
 

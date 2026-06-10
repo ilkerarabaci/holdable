@@ -1,9 +1,12 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'dae_parser.dart';
+import 'fbx_parser.dart';
 import 'gltf_parser.dart';
 import 'off_parser.dart';
 import 'ply_parser.dart';
+import 'threeds_parser.dart';
 import 'threemf_parser.dart';
 
 /// Parsing of `.obj` / `.stl` / `.glb` / `.gltf` / `.ply` model files into mesh data.
@@ -57,6 +60,7 @@ class MeshData {
     this.indices16,
     this.indices32,
     this.baseColorArgb,
+    this.textureBytes,
   });
 
   /// Optional model-supplied base color (0xAARRGGBB) — e.g. a glTF material's
@@ -64,6 +68,11 @@ class MeshData {
   /// imported GLB shows its own color (the user can still re-pick). Null = use
   /// the neutral default.
   final int? baseColorArgb;
+
+  /// Optional model-supplied base-color texture as *encoded* PNG/JPEG bytes
+  /// (e.g. a glTF material's baseColorTexture). The viewer decodes and applies
+  /// it on load so a textured GLB (a car with its livery) renders textured.
+  final Uint8List? textureBytes;
 
   /// Interleaved vertex buffer, [kFloatsPerVertex] floats per vertex.
   final Float32List vertices;
@@ -115,10 +124,17 @@ class ModelParser {
         return ThreeMfParser.parse(bytes);
       case 'off':
         return OffParser.parse(bytes);
+      case 'dae':
+        return DaeParser.parse(bytes);
+      case '3ds':
+      case 'threeds':
+        return ThreeDsParser.parse(bytes);
+      case 'fbx':
+        return FbxParser.parse(bytes);
       default:
         throw ModelParseException(
           'Unsupported format ${fmt ?? '(unknown)'} — '
-          'expected obj, stl, glb, gltf, ply, 3mf or off',
+          'expected obj, stl, glb, gltf, ply, 3mf, off, dae, 3ds or fbx',
         );
     }
   }

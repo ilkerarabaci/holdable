@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show rootBundle;
 // Hide Flutter's View/Texture so Thermion's same-named types resolve without a
 // name clash (we don't use Flutter's View/Texture widgets in this file).
 import 'package:flutter/widgets.dart' hide View, Texture;
@@ -59,6 +60,12 @@ class ModelSceneController {
   /// Environment (image-based) lighting amount 0..1 (0 = off; reflections +
   /// soft ambient as it rises).
   void setEnvironment(double amount) => _state?._setEnvironment(amount);
+
+  /// Applies a bundled texture asset (e.g. `assets/textures/wood.jpg`) to the
+  /// model's surface, or removes any texture when [assetPath] is null (the
+  /// base color drives the surface again).
+  void setTextureAsset(String? assetPath) =>
+      _state?._setTextureAsset(assetPath);
 }
 
 /// 3D viewer surface — **v0.3, Thermion (Google Filament)**.
@@ -142,6 +149,15 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   String _mode = 'solid';
   Color _baseColor = _kNeutral;
   double _currentAlpha = 1.0; // 0.35 in x-ray
+
+  // --- Texture state (decoded RGBA, uploaded lazily into a Filament texture).
+  // The decoded pixels are retained so render-mode rebuilds (new material) can
+  // re-apply the texture without re-decoding. All GPU texture work is
+  // best-effort: a failure leaves the model on its plain base color.
+  Uint8List? _texRgba;
+  int _texWidth = 0, _texHeight = 0;
+  Texture? _texture; // current Filament texture (one at a time)
+  TextureSampler? _texSampler; // shared REPEAT/LINEAR sampler, created once
   // Adjustable light rig (see _kLightRig): stored entities + the user's
   // intensity multiplier and azimuth rotation (radians, around Y).
   final List<ThermionEntity> _lights = [];
@@ -193,6 +209,13 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     final viewer = _viewer;
     _viewer = null;
     viewer?.dispose();
+    // Textures/samplers are FilamentApp-owned (not torn down with the viewer).
+    final tex = _texture;
+    _texture = null;
+    tex?.destroy().catchError((_) {});
+    final sampler = _texSampler;
+    _texSampler = null;
+    sampler?.dispose().catchError((_) {});
     super.dispose();
   }
 
@@ -271,7 +294,24 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       if (prepared.baseColorArgb != null) {
         _baseColor = Color(prepared.baseColorArgb!);
       }
+      // Texture state belongs to one model: drop the previous model's texture
+      // (destroyed after the rebuild below replaces the material that samples
+      // it), and pre-decode this model's own embedded texture if it has one
+      // (e.g. a textured GLB) so the rebuild binds it.
+      final staleTex = _texture;
+      _texture = null;
+      _texRgba = null;
+      _texWidth = 0;
+      _texHeight = 0;
+      if (prepared.textureBytes != null) {
+        await _decodeTexture(prepared.textureBytes!);
+      }
       if (_viewerReady) await _applyMode(_mode, frame: true);
+      if (staleTex != null) {
+        try {
+          await staleTex.destroy();
+        } catch (_) {}
+      }
       // Thumbnail was rasterized off-isolate alongside the parse (CPU, no GPU).
       // Encode it to PNG on the UI isolate and hand it to the host to persist.
       await _maybeEmitThumbnail(prepared);
@@ -347,6 +387,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       await material.setCullingMode(CullingMode.NONE);
       if (xray) await material.setTransparencyMode(TransparencyMode.DEFAULT);
       await _applyColorTo(material);
+      // Re-bind the active texture to the fresh material (solid/x-ray only —
+      // wireframe lines have no meaningful surface to texture).
+      if (!wireframe && _texRgba != null) await _applyTextureTo(material);
 
       final asset = await viewer.createGeometry(
         geometry,
@@ -517,18 +560,27 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   }
 
   /// Writes the current base color (sRGB → linear) into [mi] at the mode alpha.
+  /// While a texture is active (and shown — not in wireframe) the factor is
+  /// white so the texture's own colors come through unmultiplied.
   Future<void> _applyColorTo(MaterialInstance mi) async {
+    final textured = _texRgba != null && _mode != 'wireframe';
     await mi.setParameterFloat4(
       'baseColorFactor',
-      _srgbToLinear(_baseColor.r),
-      _srgbToLinear(_baseColor.g),
-      _srgbToLinear(_baseColor.b),
+      textured ? 1.0 : _srgbToLinear(_baseColor.r),
+      textured ? 1.0 : _srgbToLinear(_baseColor.g),
+      textured ? 1.0 : _srgbToLinear(_baseColor.b),
       _currentAlpha,
     );
   }
 
   Future<void> _setColor(Color color) async {
     _baseColor = color;
+    // Picking a color switches the surface back to flat color (texture off) —
+    // baseColorFactor and baseColorMap are mutually exclusive in the UI.
+    if (_texRgba != null) {
+      await _clearTexture();
+      return;
+    }
     final mi = _material;
     if (mi != null) await _applyColorTo(mi);
   }
@@ -598,6 +650,155 @@ class _ModelSceneViewState extends State<ModelSceneView> {
 
   void _setRenderMode(String mode) {
     _applyMode(mode);
+  }
+
+  // --- Texture (parametric surface texture on any model) --------------------
+  //
+  // The encoded image (bundled asset or a glTF's embedded base-color texture)
+  // is decoded to RGBA on the UI isolate, uploaded into a Filament sRGB
+  // texture and bound to the ubershader's baseColorMap (enabled by pointing
+  // baseColorIndex at UV set 0). Every step is best-effort: any failure leaves
+  // the model rendering with its plain base color — never black, never a crash.
+
+  Future<void> _setTextureAsset(String? assetPath) async {
+    if (assetPath == null) {
+      await _clearTexture();
+      return;
+    }
+    try {
+      final bytes = (await rootBundle.load(assetPath)).buffer.asUint8List();
+      await _applyTextureBytes(bytes);
+    } catch (_) {/* asset missing/undecodable — keep the current look */}
+  }
+
+  /// Decodes [encoded] (PNG/JPEG) and swaps it in as the active texture.
+  Future<void> _applyTextureBytes(Uint8List encoded) async {
+    final old = _texture;
+    if (!await _decodeTexture(encoded)) return;
+    _texture = null; // force a fresh GPU texture for the new pixels
+    final mi = _material;
+    if (mi != null) await _applyTextureTo(mi);
+    // Destroy the previous texture only after the new one is bound.
+    if (old != null) {
+      try {
+        await old.destroy();
+      } catch (_) {}
+    }
+  }
+
+  /// Removes the active texture: disables baseColorMap sampling on the live
+  /// material (baseColorIndex = -1), restores the base color, then frees the
+  /// GPU texture.
+  Future<void> _clearTexture() async {
+    _texRgba = null;
+    _texWidth = 0;
+    _texHeight = 0;
+    final mi = _material;
+    final old = _texture;
+    _texture = null;
+    try {
+      if (mi != null) {
+        await UbershaderMaterialInstance(mi).setBaseColorUV(-1);
+        await _applyColorTo(mi);
+      }
+    } catch (_) {/* worst case: texture lingers until the next mode rebuild */}
+    if (old != null) {
+      try {
+        await old.destroy();
+      } catch (_) {}
+    }
+  }
+
+  /// Decodes PNG/JPEG bytes into [_texRgba] (straight RGBA8888).
+  Future<bool> _decodeTexture(Uint8List encoded) async {
+    try {
+      final codec = await ui.instantiateImageCodec(encoded);
+      final frame = await codec.getNextFrame();
+      final img = frame.image;
+      final data =
+          await img.toByteData(format: ui.ImageByteFormat.rawStraightRgba);
+      final w = img.width, h = img.height;
+      img.dispose();
+      codec.dispose();
+      if (data == null || w <= 0 || h <= 0) return false;
+      _texRgba = data.buffer.asUint8List();
+      _texWidth = w;
+      _texHeight = h;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Binds the decoded texture to [mi], creating the GPU texture on demand.
+  Future<void> _applyTextureTo(MaterialInstance mi) async {
+    final rgba = _texRgba;
+    final app = FilamentApp.instance;
+    if (rgba == null || app == null) return;
+    try {
+      var tex = _texture;
+      tex ??= _texture = await _createGpuTexture(rgba, _texWidth, _texHeight);
+      if (tex == null) return;
+      _texSampler ??= await app.createTextureSampler(
+        minFilter: TextureMinFilter.LINEAR_MIPMAP_LINEAR,
+        magFilter: TextureMagFilter.LINEAR,
+        wrapS: TextureWrapMode.REPEAT,
+        wrapT: TextureWrapMode.REPEAT,
+      );
+      final uber = UbershaderMaterialInstance(mi);
+      await uber.setBaseColorTexture(tex, _texSampler!);
+      await uber.setBaseColorUV(0); // enable: sample baseColorMap with UV set 0
+      await _applyColorTo(mi); // white factor while textured (texture shows true)
+    } catch (_) {/* model stays plain-colored */}
+  }
+
+  /// Uploads RGBA pixels into a new sRGB Filament texture — mipmapped when the
+  /// device allows the blit-capable allocation, single-level otherwise.
+  Future<Texture?> _createGpuTexture(Uint8List rgba, int w, int h) async {
+    final app = FilamentApp.instance!;
+    var levels = 1;
+    var maxDim = math.max(w, h);
+    while (maxDim > 1) {
+      levels++;
+      maxDim >>= 1;
+    }
+    try {
+      final tex = await app.createTexture(
+        w,
+        h,
+        levels: levels,
+        flags: {
+          TextureUsage.TEXTURE_USAGE_SAMPLEABLE,
+          TextureUsage.TEXTURE_USAGE_UPLOADABLE,
+          TextureUsage.TEXTURE_USAGE_BLIT_SRC,
+          TextureUsage.TEXTURE_USAGE_BLIT_DST,
+        },
+        textureFormat: TextureFormat.SRGB8_A8,
+      );
+      try {
+        await tex.setImage(
+            0, rgba, w, h, PixelDataFormat.RGBA, PixelDataType.UBYTE);
+        await tex.generateMipmaps();
+        return tex;
+      } catch (_) {
+        try {
+          await tex.destroy();
+        } catch (_) {}
+        rethrow;
+      }
+    } catch (_) {/* fall through to the single-level path */}
+    try {
+      final tex = await app.createTexture(
+        w,
+        h,
+        textureFormat: TextureFormat.SRGB8_A8,
+      );
+      await tex.setImage(
+          0, rgba, w, h, PixelDataFormat.RGBA, PixelDataType.UBYTE);
+      return tex;
+    } catch (_) {
+      return null;
+    }
   }
 
   // --- Thumbnail (CPU rasterized, no GPU) -----------------------------------
@@ -691,10 +892,15 @@ class _PreparedModel {
     this.thumbnailRgba,
     this.thumbSize = 0,
     this.baseColorArgb,
+    this.textureBytes,
   });
 
   /// Model-supplied base colour (e.g. a glTF material) used as the initial color.
   final int? baseColorArgb;
+
+  /// Model-supplied base-color texture (encoded PNG/JPEG, e.g. from a GLB),
+  /// auto-applied on load so textured models show their real surface.
+  final Uint8List? textureBytes;
 
   final Float32List positions; // 3 floats / vertex
   final Float32List normals; // 3 floats / vertex
@@ -734,6 +940,42 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
     normals[i * 3 + 2] = src[s + 5];
     uvs[i * 2] = src[s + 6];
     uvs[i * 2 + 1] = src[s + 7];
+  }
+
+  // Models without authored UVs (STL/OFF/3MF, OBJ without vt, glTF without
+  // TEXCOORD_0) get box-mapped fallback UVs so a texture still wraps sensibly:
+  // each vertex projects onto the bounds plane perpendicular to its normal's
+  // dominant axis, scaled so the texture tiles ~2× across the model.
+  var hasUv = false;
+  for (var i = 0; i < uvs.length; i++) {
+    if (uvs[i] != 0) {
+      hasUv = true;
+      break;
+    }
+  }
+  final mb = mesh.bounds;
+  if (!hasUv && n > 0) {
+    final ext = math.max(mb.longestExtent, 1e-6);
+    const tiles = 2.0;
+    for (var i = 0; i < n; i++) {
+      final ax = normals[i * 3].abs();
+      final ay = normals[i * 3 + 1].abs();
+      final az = normals[i * 3 + 2].abs();
+      final px = positions[i * 3], py = positions[i * 3 + 1], pz = positions[i * 3 + 2];
+      double u, v;
+      if (ax >= ay && ax >= az) {
+        u = (pz - mb.minZ) / ext;
+        v = (py - mb.minY) / ext;
+      } else if (ay >= ax && ay >= az) {
+        u = (px - mb.minX) / ext;
+        v = (pz - mb.minZ) / ext;
+      } else {
+        u = (px - mb.minX) / ext;
+        v = (py - mb.minY) / ext;
+      }
+      uvs[i * 2] = u * tiles;
+      uvs[i * 2 + 1] = v * tiles;
+    }
   }
 
   // Index buffer: reuse OBJ's indices, or synthesize sequential ones for STL
@@ -809,5 +1051,6 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
     thumbnailRgba: thumb,
     thumbSize: req.thumbSize,
     baseColorArgb: mesh.baseColorArgb,
+    textureBytes: mesh.textureBytes,
   );
 }

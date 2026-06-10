@@ -25,4 +25,11 @@ const kSampleModels = <SampleModel>[
   SampleModel(
       name: 'Lounge chair', asset: 'assets/sample_models/lounge_chair.glb'),
   SampleModel(name: 'Camera', asset: 'assets/sample_models/camera.glb'),
+  // Fully textured showcase (Khronos ToyCar, CC0) — kept WITH its texture:
+  // the viewer reads the GLB's embedded base-color texture + TEXCOORD_0 UVs.
+  SampleModel(name: 'Toy car', asset: 'assets/sample_models/toy_car.glb'),
+  // alpha.28 formats (procedurally generated, CC0).
+  SampleModel(name: 'Vase (DAE)', asset: 'assets/sample_models/vase.dae'),
+  SampleModel(name: 'Gem (3DS)', asset: 'assets/sample_models/gem.3ds'),
+  SampleModel(name: 'Star (FBX)', asset: 'assets/sample_models/star.fbx'),
 ];
