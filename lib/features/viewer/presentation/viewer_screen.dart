@@ -547,6 +547,7 @@ class _RenderPanelState extends State<_RenderPanel> {
                   color: c.textMuted)),
           _LightSlider(
             icon: LucideIcons.sun,
+            tooltip: 'Brightness — how strong the lights are',
             value: _intensity,
             min: 0.2,
             max: 2.5,
@@ -556,6 +557,7 @@ class _RenderPanelState extends State<_RenderPanel> {
           ),
           _LightSlider(
             icon: LucideIcons.compass,
+            tooltip: 'Light angle — turns where the light comes from',
             value: _angle,
             min: 0.0,
             max: 6.2831853, // 2π
@@ -567,6 +569,7 @@ class _RenderPanelState extends State<_RenderPanel> {
           ),
           _LightSlider(
             icon: LucideIcons.globe, // environment / reflections (IBL), 0 = off
+            tooltip: 'Environment reflections — 0 = off, right = shinier/realistic',
             value: _environment,
             min: 0.0,
             max: 1.0,
@@ -580,7 +583,8 @@ class _RenderPanelState extends State<_RenderPanel> {
   }
 }
 
-/// A compact icon + slider row for a light control.
+/// A compact icon + slider row for a light control. [tooltip] gives a one-line
+/// hint (tap or long-press the icon).
 class _LightSlider extends StatelessWidget {
   const _LightSlider({
     required this.icon,
@@ -589,6 +593,7 @@ class _LightSlider extends StatelessWidget {
     required this.max,
     required this.onChanged,
     this.onChangeEnd,
+    this.tooltip,
   });
   final IconData icon;
   final double value;
@@ -596,12 +601,25 @@ class _LightSlider extends StatelessWidget {
   final double max;
   final ValueChanged<double> onChanged;
   final ValueChanged<double>? onChangeEnd;
+  final String? tooltip;
 
   @override
   Widget build(BuildContext context) {
     final c = context.prism;
+    final iconWidget = Icon(icon, size: 18, color: c.textMuted);
     return Row(children: [
-      Icon(icon, size: 18, color: c.textMuted),
+      if (tooltip != null)
+        Tooltip(
+          message: tooltip!,
+          triggerMode: TooltipTriggerMode.tap,
+          showDuration: const Duration(seconds: 3),
+          child: Padding(
+            padding: const EdgeInsets.all(4),
+            child: iconWidget,
+          ),
+        )
+      else
+        iconWidget,
       Expanded(
         child: Slider(
           value: value.clamp(min, max),
