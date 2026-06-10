@@ -12,6 +12,7 @@ base color. No attribution is required under CC0; credited here as good practice
 | Teacup        | DiffuseTransmissionTeacup | CC0 1.0 | github.com/KhronosGroup/glTF-Sample-Assets |
 | Lounge chair  | SheenChair              | CC0 1.0 | github.com/KhronosGroup/glTF-Sample-Assets |
 | Camera        | AntiqueCamera           | CC0 1.0 | github.com/KhronosGroup/glTF-Sample-Assets |
+| Toy car       | ToyCar (car body only, kept textured; fabric/glass removed) | CC0 1.0 | github.com/KhronosGroup/glTF-Sample-Assets |
 
 ## Basic shapes
 The geometric primitives (cube, sphere, torus, gear, lamp, polyhedra) are

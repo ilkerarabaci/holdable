@@ -89,8 +89,112 @@ Uint8List _glb({
   return bytes;
 }
 
+/// Builds a GLB triangle with TEXCOORD_0 UVs and a material whose base-color
+/// texture points at embedded (fake) PNG bytes, exercising the texture path.
+Uint8List _texturedGlb() {
+  final pos = Float32List.fromList([0, 0, 0, 2, 0, 0, 0, 3, 0]);
+  final uv = Float32List.fromList([0, 0, 1, 0, 0, 1]);
+  final png = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 1, 2, 3, 4]);
+
+  // BIN: pos [0,36) | uv [36,60) | png [60,68)
+  final bin = Uint8List(68)
+    ..setRange(0, 36, pos.buffer.asUint8List())
+    ..setRange(36, 60, uv.buffer.asUint8List())
+    ..setRange(60, 68, png);
+
+  final gltf = <String, dynamic>{
+    'asset': {'version': '2.0'},
+    'scene': 0,
+    'scenes': [
+      {'nodes': [0]}
+    ],
+    'nodes': [
+      {'mesh': 0}
+    ],
+    'meshes': [
+      {
+        'primitives': [
+          {
+            'attributes': {'POSITION': 0, 'TEXCOORD_0': 1},
+            'material': 0,
+          }
+        ]
+      }
+    ],
+    'materials': [
+      {
+        'pbrMetallicRoughness': {
+          'baseColorTexture': {'index': 0}
+        }
+      }
+    ],
+    'textures': [
+      {'source': 0}
+    ],
+    'images': [
+      {'bufferView': 2, 'mimeType': 'image/png'}
+    ],
+    'accessors': [
+      {
+        'bufferView': 0,
+        'componentType': 5126,
+        'count': 3,
+        'type': 'VEC3',
+        'min': [0, 0, 0],
+        'max': [2, 3, 0],
+      },
+      {'bufferView': 1, 'componentType': 5126, 'count': 3, 'type': 'VEC2'},
+    ],
+    'bufferViews': [
+      {'buffer': 0, 'byteOffset': 0, 'byteLength': 36},
+      {'buffer': 0, 'byteOffset': 36, 'byteLength': 24},
+      {'buffer': 0, 'byteOffset': 60, 'byteLength': 8},
+    ],
+    'buffers': [
+      {'byteLength': 68}
+    ],
+  };
+
+  final jsonBytes = utf8.encode(json.encode(gltf));
+  final jsonLen = (jsonBytes.length + 3) & ~3;
+  final jsonChunk = Uint8List(jsonLen)..fillRange(0, jsonLen, 0x20);
+  jsonChunk.setRange(0, jsonBytes.length, jsonBytes);
+  final total = 12 + 8 + jsonLen + 8 + bin.length;
+  final out = ByteData(total);
+  out.setUint32(0, 0x46546C67, Endian.little);
+  out.setUint32(4, 2, Endian.little);
+  out.setUint32(8, total, Endian.little);
+  out.setUint32(12, jsonLen, Endian.little);
+  out.setUint32(16, 0x4E4F534A, Endian.little);
+  final bytes = out.buffer.asUint8List();
+  bytes.setRange(20, 20 + jsonLen, jsonChunk);
+  out.setUint32(20 + jsonLen, bin.length, Endian.little);
+  out.setUint32(20 + jsonLen + 4, 0x004E4942, Endian.little);
+  bytes.setRange(20 + jsonLen + 8, 20 + jsonLen + 8 + bin.length, bin);
+  return bytes;
+}
+
 void main() {
   group('GltfParser', () {
+    test('reads TEXCOORD_0 UVs and extracts the base-color texture', () {
+      final m = GltfParser.parse(_texturedGlb());
+      expect(m.vertexCount, 3);
+      // UVs land in the interleaved buffer at floats 6,7.
+      expect(m.vertices[1 * kFloatsPerVertex + 6], closeTo(1.0, 1e-6));
+      expect(m.vertices[2 * kFloatsPerVertex + 7], closeTo(1.0, 1e-6));
+      // The embedded image bytes come back verbatim.
+      expect(m.textureBytes, isNotNull);
+      expect(m.textureBytes!.length, 8);
+      expect(m.textureBytes![0], 0x89);
+      expect(m.textureBytes![1], 0x50);
+    });
+
+    test('models without TEXCOORD_0 have zero UVs and no texture', () {
+      final m = GltfParser.parse(_glb());
+      expect(m.textureBytes, isNull);
+      expect(m.vertices[0 * kFloatsPerVertex + 6], 0);
+      expect(m.vertices[0 * kFloatsPerVertex + 7], 0);
+    });
     test('parses a GLB triangle into MeshData (counts, bounds, normals)', () {
       final m = GltfParser.parse(_glb());
       expect(m.vertexCount, 3);

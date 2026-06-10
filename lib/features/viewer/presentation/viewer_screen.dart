@@ -16,6 +16,7 @@ import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
 import '../../ar/data/ar_export.dart';
 import '../../ar/presentation/ar_view_screen.dart';
+import '../data/bundled_textures.dart';
 import '../data/gpu_support.dart';
 import '../data/native_stats.dart';
 import '../data/thumbnail_service.dart' show kThumbnailVersionSuffix;
@@ -218,6 +219,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                 child: _RenderPanel(
                   onMode: _scene.setRenderMode,
                   onColor: _scene.setColor,
+                  onTexture: _scene.setTextureAsset,
                   onLightIntensity: _scene.setLightIntensity,
                   onLightAngle: _scene.setLightAngle,
                   onEnvironment: _scene.setEnvironment,
@@ -416,12 +418,16 @@ class _RenderPanel extends StatefulWidget {
   const _RenderPanel({
     required this.onMode,
     required this.onColor,
+    required this.onTexture,
     required this.onLightIntensity,
     required this.onLightAngle,
     required this.onEnvironment,
   });
   final ValueChanged<String> onMode;
   final ValueChanged<Color> onColor;
+
+  /// Bundled texture asset path, or null for "None" (back to flat color).
+  final ValueChanged<String?> onTexture;
   final ValueChanged<double> onLightIntensity;
   final ValueChanged<double> onLightAngle;
   final ValueChanged<double> onEnvironment;
@@ -441,13 +447,24 @@ class _RenderPanelState extends State<_RenderPanel> {
   ];
 
   Color _current = _neutral;
+  String? _textureSel; // selected bundled texture asset path; null = none
   double _intensity = 1.0; // light-rig multiplier (matches scene default)
   double _angle = 0.0; // rig azimuth, radians
   double _environment = 0.0; // IBL environment amount (0 = off, scene default)
 
   void _pick(Color c) {
-    setState(() => _current = c);
+    // Color and texture are mutually exclusive — picking a color drops the
+    // texture (the scene does the same on its side).
+    setState(() {
+      _current = c;
+      _textureSel = null;
+    });
     widget.onColor(c);
+  }
+
+  void _pickTexture(String? assetPath) {
+    setState(() => _textureSel = assetPath);
+    widget.onTexture(assetPath);
   }
 
   /// Opens a full HSV colour picker so any colour (not just the presets) can be
@@ -532,11 +549,31 @@ class _RenderPanelState extends State<_RenderPanel> {
               ),
             // Full-spectrum picker launcher (rainbow ring + palette glyph).
             _CustomSwatch(
-              selected: !_quick
-                  .any((q) => q.toARGB32() == _current.toARGB32()),
+              selected: _textureSel == null &&
+                  !_quick.any((q) => q.toARGB32() == _current.toARGB32()),
               current: _current,
               onTap: _openFullPicker,
             ),
+          ]),
+          const SizedBox(height: 14),
+          Text('TEXTURE',
+              style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  letterSpacing: 1,
+                  color: c.textMuted)),
+          const SizedBox(height: 10),
+          Row(children: [
+            _NoneSwatch(
+              selected: _textureSel == null,
+              onTap: () => _pickTexture(null),
+            ),
+            for (final t in kBundledTextures)
+              _TextureSwatch(
+                texture: t,
+                selected: _textureSel == t.assetPath,
+                onTap: () => _pickTexture(t.assetPath),
+              ),
           ]),
           const SizedBox(height: 14),
           Text('LIGHT',
@@ -667,6 +704,82 @@ class _CustomSwatch extends StatelessWidget {
           ),
         ),
         child: Icon(Icons.add, size: 16, color: Colors.white.withValues(alpha: 0.9)),
+      ),
+    );
+  }
+}
+
+/// A circular preview of a bundled texture (tap to apply it to the model).
+class _TextureSwatch extends StatelessWidget {
+  const _TextureSwatch({
+    required this.texture,
+    required this.selected,
+    required this.onTap,
+  });
+  final BundledTexture texture;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.prism;
+    return Padding(
+      padding: const EdgeInsets.only(right: 12),
+      child: Tooltip(
+        message: texture.name,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(999),
+          child: Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: selected ? c.textPrimary : c.borderHairline,
+                width: selected ? 2 : 1,
+              ),
+              image: DecorationImage(
+                image: AssetImage(texture.assetPath),
+                fit: BoxFit.cover,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// "No texture" swatch — restores the flat base color.
+class _NoneSwatch extends StatelessWidget {
+  const _NoneSwatch({required this.selected, required this.onTap});
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.prism;
+    return Padding(
+      padding: const EdgeInsets.only(right: 12),
+      child: Tooltip(
+        message: 'None',
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(999),
+          child: Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: selected ? c.textPrimary : c.borderHairline,
+                width: selected ? 2 : 1,
+              ),
+            ),
+            child: Icon(LucideIcons.ban, size: 16, color: c.textMuted),
+          ),
+        ),
       ),
     );
   }

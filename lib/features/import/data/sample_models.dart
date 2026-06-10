@@ -25,4 +25,7 @@ const kSampleModels = <SampleModel>[
   SampleModel(
       name: 'Lounge chair', asset: 'assets/sample_models/lounge_chair.glb'),
   SampleModel(name: 'Camera', asset: 'assets/sample_models/camera.glb'),
+  // Fully textured showcase (Khronos ToyCar, CC0) — kept WITH its texture:
+  // the viewer reads the GLB's embedded base-color texture + TEXCOORD_0 UVs.
+  SampleModel(name: 'Toy car', asset: 'assets/sample_models/toy_car.glb'),
 ];

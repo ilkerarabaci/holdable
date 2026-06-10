@@ -57,6 +57,7 @@ class MeshData {
     this.indices16,
     this.indices32,
     this.baseColorArgb,
+    this.textureBytes,
   });
 
   /// Optional model-supplied base color (0xAARRGGBB) — e.g. a glTF material's
@@ -64,6 +65,11 @@ class MeshData {
   /// imported GLB shows its own color (the user can still re-pick). Null = use
   /// the neutral default.
   final int? baseColorArgb;
+
+  /// Optional model-supplied base-color texture as *encoded* PNG/JPEG bytes
+  /// (e.g. a glTF material's baseColorTexture). The viewer decodes and applies
+  /// it on load so a textured GLB (a car with its livery) renders textured.
+  final Uint8List? textureBytes;
 
   /// Interleaved vertex buffer, [kFloatsPerVertex] floats per vertex.
   final Float32List vertices;

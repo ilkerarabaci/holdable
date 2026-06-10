@@ -13,9 +13,13 @@ import 'model_parser.dart';
 /// Supported: GLB container and `.gltf` JSON with an embedded base64 `data:`
 /// buffer; scene/node hierarchy with TRS or matrix transforms; multiple
 /// meshes/primitives (merged); POSITION (+ NORMAL, else smooth-computed);
-/// USHORT/UINT/UBYTE or non-indexed triangles. Materials/textures are dropped
-/// (the viewer applies its own neutral PBR + color/render modes). Unsupported
-/// (clear error): Draco/meshopt compression, external `.bin`, non-triangles.
+/// TEXCOORD_0 (float or normalized ubyte/ushort); USHORT/UINT/UBYTE or
+/// non-indexed triangles. The base-color texture of the *largest* primitive
+/// (by triangle count) is extracted as encoded PNG/JPEG bytes so the viewer
+/// can show a textured model (e.g. a car with its livery); since primitives
+/// are merged into one mesh, other primitives' textures are dropped.
+/// Unsupported (clear error): Draco/meshopt compression, external `.bin`,
+/// non-triangles.
 class GltfParser {
   static const int _glbMagic = 0x46546C67; // 'glTF'
   static const int _chunkJson = 0x4E4F534A; // 'JSON'
@@ -73,6 +77,35 @@ class GltfParser {
       return out;
     }
 
+    // TEXCOORD accessor: float, or normalized ubyte/ushort (glTF 2.0 §3.6.2.2).
+    List<double> readVec2(int accessorIndex) {
+      final acc = accessors[accessorIndex] as Map<String, dynamic>;
+      final bv = bufferViews[acc['bufferView'] as int] as Map<String, dynamic>;
+      final bd = bdFor(bv['buffer'] as int);
+      final base =
+          (bv['byteOffset'] as int? ?? 0) + (acc['byteOffset'] as int? ?? 0);
+      final ct = acc['componentType'] as int? ?? 5126;
+      final compSize = ct == 5121 ? 1 : (ct == 5123 ? 2 : 4);
+      final stride = bv['byteStride'] as int? ?? compSize * 2;
+      final count = acc['count'] as int;
+      final out = Float64List(count * 2);
+      for (var i = 0; i < count; i++) {
+        final o = base + i * stride;
+        switch (ct) {
+          case 5121: // normalized ubyte
+            out[i * 2] = bd.getUint8(o) / 255.0;
+            out[i * 2 + 1] = bd.getUint8(o + 1) / 255.0;
+          case 5123: // normalized ushort
+            out[i * 2] = bd.getUint16(o, Endian.little) / 65535.0;
+            out[i * 2 + 1] = bd.getUint16(o + 2, Endian.little) / 65535.0;
+          default: // float
+            out[i * 2] = bd.getFloat32(o, Endian.little);
+            out[i * 2 + 1] = bd.getFloat32(o + 4, Endian.little);
+        }
+      }
+      return out;
+    }
+
     List<int> readIndices(int accessorIndex) {
       final acc = accessors[accessorIndex] as Map<String, dynamic>;
       final bv = bufferViews[acc['bufferView'] as int] as Map<String, dynamic>;
@@ -100,7 +133,40 @@ class GltfParser {
     var vertexOffset = 0;
     final b = _BoundsAccumulator();
     final materials = (gltf['materials'] as List?) ?? const [];
+    final textures = (gltf['textures'] as List?) ?? const [];
+    final images = (gltf['images'] as List?) ?? const [];
     int? firstColorArgb;
+    // Base-color texture of the largest primitive (by triangle count) — the
+    // best single texture to show on the merged mesh (e.g. a car body livery).
+    Uint8List? textureBytes;
+    var textureOwnerTris = -1;
+
+    // Encoded PNG/JPEG bytes of a material's base-color texture, if present.
+    Uint8List? extractBaseColorImage(int materialIndex) {
+      if (materialIndex < 0 || materialIndex >= materials.length) return null;
+      final pbr = (materials[materialIndex] as Map<String, dynamic>?)?[
+          'pbrMetallicRoughness'] as Map<String, dynamic>?;
+      final texInfo = pbr?['baseColorTexture'] as Map<String, dynamic>?;
+      final texIndex = texInfo?['index'] as int?;
+      if (texIndex == null || texIndex < 0 || texIndex >= textures.length) {
+        return null;
+      }
+      final source =
+          (textures[texIndex] as Map<String, dynamic>)['source'] as int?;
+      if (source == null || source < 0 || source >= images.length) return null;
+      final image = images[source] as Map<String, dynamic>;
+      final uri = image['uri'] as String?;
+      if (uri != null && uri.startsWith('data:')) {
+        return base64.decode(uri.substring(uri.indexOf(',') + 1));
+      }
+      final bvIndex = image['bufferView'] as int?;
+      if (bvIndex == null) return null;
+      final bv = bufferViews[bvIndex] as Map<String, dynamic>;
+      final buf = buffers[bv['buffer'] as int];
+      final off = bv['byteOffset'] as int? ?? 0;
+      final len = bv['byteLength'] as int;
+      return Uint8List.sublistView(buf, off, off + len);
+    }
 
     void addPrimitive(Map<String, dynamic> prim, Float64List world) {
       final mode = prim['mode'] as int? ?? 4;
@@ -132,6 +198,25 @@ class GltfParser {
       final List<int> localIdx = prim['indices'] != null
           ? readIndices(prim['indices'] as int)
           : List<int>.generate(vCount, (i) => i);
+
+      // Keep the base-color texture of the biggest primitive seen so far.
+      final primTris = localIdx.length ~/ 3;
+      if (prim['material'] is int && primTris > textureOwnerTris) {
+        final img = extractBaseColorImage(prim['material'] as int);
+        if (img != null) {
+          textureBytes = img;
+          textureOwnerTris = primTris;
+        }
+      }
+
+      // UVs (TEXCOORD_0) — kept as-authored so the texture maps correctly.
+      Float64List? uvs;
+      if (attrs['TEXCOORD_0'] != null) {
+        final raw = readVec2(attrs['TEXCOORD_0'] as int);
+        if (raw.length >= vCount * 2) {
+          uvs = raw is Float64List ? raw : Float64List.fromList(raw);
+        }
+      }
 
       // World-space positions.
       final wpos = Float64List(vCount * 3);
@@ -170,8 +255,8 @@ class GltfParser {
           ..add(normals[i * 3])
           ..add(normals[i * 3 + 1])
           ..add(normals[i * 3 + 2])
-          ..add(0) // u
-          ..add(0) // v
+          ..add(uvs != null ? uvs[i * 2] : 0) // u
+          ..add(uvs != null ? uvs[i * 2 + 1] : 0) // v
           ..add(1) // r
           ..add(1) // g
           ..add(1) // b
@@ -218,6 +303,7 @@ class GltfParser {
       bounds: b.build(),
       indices32: Uint32List.fromList(indices),
       baseColorArgb: firstColorArgb,
+      textureBytes: textureBytes,
     );
   }
 
