@@ -179,13 +179,16 @@ class _ModelSceneViewState extends State<ModelSceneView> {
 
   // --- Texture state. The ENCODED image (PNG/JPEG bytes) is retained so
   // render-mode rebuilds (new material) can re-apply the texture; decoding
-  // happens natively on Filament's render thread via FilamentApp.decodeImage +
-  // Texture.setLinearImage — the exact path thermion's own tests exercise.
-  // (The first attempt used Texture.setImage, which crashed the app on device:
-  // that FFI passes the PixelDataFormat/Type enum .index where native expects
-  // .value, so the pixel format arrived garbled — a native abort no Dart
-  // try/catch can stop.) All GPU texture work is still best-effort: a failure
-  // leaves the model on its plain base color.
+  // happens natively via FilamentApp.decodeImage + Texture.setLinearImage —
+  // the exact path thermion's own tests exercise. THE device-crash lesson
+  // (alpha.28/.29): the gltfio ubershader is a VARIANT ARCHIVE — only a
+  // material created with hasBaseColorTexture: true owns the baseColorMap /
+  // baseColorIndex parameters, and Filament's setParameter on a missing
+  // parameter aborts NATIVELY (uncatchable). So binding happens in _applyMode
+  // on the matching variant, never on a live plain material. (Avoid
+  // Texture.setImage too: its FFI passes enum .index where native expects
+  // .value.) All GPU texture work is best-effort: a failure leaves the model
+  // on its plain base color.
   Uint8List? _texEncoded;
   Texture? _texture; // current Filament texture (one at a time)
   TextureSampler? _texSampler; // shared REPEAT/LINEAR sampler, created once
@@ -410,6 +413,20 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         );
       }
 
+      // GPU texture first (solid/x-ray only): the ubershader is a VARIANT
+      // ARCHIVE — a material instance only *has* the baseColorMap/baseColorIndex
+      // parameters when created with hasBaseColorTexture: true, and Filament's
+      // MaterialInstance::setParameter on a missing parameter ABORTS natively
+      // (the alpha.28/.29 device crash). So the texture must exist before the
+      // material is created, and binding happens on the matching variant.
+      Texture? tex;
+      if (!wireframe && _texEncoded != null) {
+        try {
+          tex = _texture ??= await _createGpuTexture(_texEncoded!);
+        } catch (_) {/* fall back to the untextured variant */}
+      }
+      final bool textured = tex != null;
+
       // Material: lit ubershader for solid, blended for x-ray, unlit for the
       // wireframe (line shading is meaningless).
       final material = await FilamentApp.instance!.createUbershaderMaterialInstance(
@@ -419,13 +436,23 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         // the inside/under faces (OBJ/STL winding is inconsistent) stay black
         // and the color doesn't read on every surface.
         doubleSided: true,
+        hasBaseColorTexture: textured,
+        baseColorUV: 0,
       );
       await material.setCullingMode(CullingMode.NONE);
       if (xray) await material.setTransparencyMode(TransparencyMode.DEFAULT);
+      if (textured) {
+        try {
+          _texSampler ??= await FilamentApp.instance!.createTextureSampler(
+            wrapS: TextureWrapMode.REPEAT,
+            wrapT: TextureWrapMode.REPEAT,
+          );
+          final uber = UbershaderMaterialInstance(material);
+          await uber.setBaseColorTexture(tex, _texSampler!);
+          await uber.setBaseColorUV(0); // sample baseColorMap with UV set 0
+        } catch (_) {/* variant has the params; binding is best-effort anyway */}
+      }
       await _applyColorTo(material);
-      // Re-bind the active texture to the fresh material (solid/x-ray only —
-      // wireframe lines have no meaningful surface to texture).
-      if (!wireframe && _texEncoded != null) await _applyTextureTo(material);
 
       final asset = await viewer.createGeometry(
         geometry,
@@ -599,7 +626,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   /// While a texture is active (and shown — not in wireframe) the factor is
   /// white so the texture's own colors come through unmultiplied.
   Future<void> _applyColorTo(MaterialInstance mi) async {
-    final textured = _texEncoded != null && _mode != 'wireframe';
+    final textured = _texture != null && _mode != 'wireframe';
     await mi.setParameterFloat4(
       'baseColorFactor',
       textured ? 1.0 : _srgbToLinear(_baseColor.r),
@@ -785,14 +812,16 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     } catch (_) {/* asset missing/undecodable — keep the current look */}
   }
 
-  /// Swaps [encoded] (PNG/JPEG bytes) in as the active texture.
+  /// Swaps [encoded] (PNG/JPEG bytes) in as the active texture. Rebuilds the
+  /// asset so the material is the hasBaseColorTexture VARIANT (the only one
+  /// that owns the baseColorMap/baseColorIndex parameters — binding them on
+  /// the plain variant is a native abort).
   Future<void> _applyTextureBytes(Uint8List encoded) async {
     final old = _texture;
     _texEncoded = encoded;
     _texture = null; // force a fresh GPU texture for the new pixels
-    final mi = _material;
-    if (mi != null) await _applyTextureTo(mi);
-    // Destroy the previous texture only after the new one is bound.
+    await _applyMode(_mode);
+    // Destroy the previous texture only after the rebuild stopped sampling it.
     if (old != null) {
       try {
         await old.destroy();
@@ -800,45 +829,18 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     }
   }
 
-  /// Removes the active texture: disables baseColorMap sampling on the live
-  /// material (baseColorIndex = -1), restores the base color, then frees the
-  /// GPU texture.
+  /// Removes the active texture: rebuilds the asset on the untextured material
+  /// variant (base color drives the surface again), then frees the GPU texture.
   Future<void> _clearTexture() async {
     _texEncoded = null;
-    final mi = _material;
     final old = _texture;
     _texture = null;
-    try {
-      if (mi != null) {
-        await UbershaderMaterialInstance(mi).setBaseColorUV(-1);
-        await _applyColorTo(mi);
-      }
-    } catch (_) {/* worst case: texture lingers until the next mode rebuild */}
+    await _applyMode(_mode);
     if (old != null) {
       try {
         await old.destroy();
       } catch (_) {}
     }
-  }
-
-  /// Binds the active texture to [mi], creating the GPU texture on demand.
-  Future<void> _applyTextureTo(MaterialInstance mi) async {
-    final encoded = _texEncoded;
-    final app = FilamentApp.instance;
-    if (encoded == null || app == null) return;
-    try {
-      var tex = _texture;
-      tex ??= _texture = await _createGpuTexture(encoded);
-      if (tex == null) return;
-      _texSampler ??= await app.createTextureSampler(
-        wrapS: TextureWrapMode.REPEAT,
-        wrapT: TextureWrapMode.REPEAT,
-      );
-      final uber = UbershaderMaterialInstance(mi);
-      await uber.setBaseColorTexture(tex, _texSampler!);
-      await uber.setBaseColorUV(0); // enable: sample baseColorMap with UV set 0
-      await _applyColorTo(mi); // white factor while textured (texture shows true)
-    } catch (_) {/* model stays plain-colored */}
   }
 
   /// Decodes [encoded] natively and uploads it into a linear float texture
