@@ -896,32 +896,39 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     }
   }
 
-  /// Decodes [encoded] natively and uploads it into a linear float texture
-  /// (RGBA32F / RGB32F to match the decoded channel count) — mirrors
-  /// thermion's `LinearImage.decodeToTexture` helper, with cleanup.
+  /// Decodes [encoded] natively and uploads it into an RGBA32F linear texture.
+  ///
+  /// `requireAlpha: true` is LOAD-BEARING: it forces the native stb decode to
+  /// 4 channels. A 3-channel image (any JPEG, alpha-less PNG — e.g. the
+  /// bundled wood/metal/marble/fabric and ToyCar's livery) would otherwise
+  /// take the RGB/RGB32F path, which thermion's own tests never exercise and
+  /// which Filament ABORTS on natively at `setImage` (the alpha.28–.31 device
+  /// crash; pinned `TTexture.cpp Texture_loadImage` sizes the buffer from the
+  /// channel count and Vulkan rejects 3-channel float). The 4-channel path
+  /// (RGBA32F + RGBA + FLOAT) is exactly what thermion's test-suite uses.
   Future<Texture?> _createGpuTexture(Uint8List encoded) async {
     final app = FilamentApp.instance!;
     LinearImage? image;
     try {
       _trace('decodeImage');
-      image = await app.decodeImage(encoded);
+      image = await app.decodeImage(encoded, requireAlpha: true);
       _trace('getImageDimensions');
       final w = await image.getWidth();
       final h = await image.getHeight();
       final channels = await image.getChannels();
-      if (w <= 0 || h <= 0) return null;
-      final rgba = channels >= 4;
+      // Anything but the upstream-tested 4-channel layout is a no-go.
+      if (w <= 0 || h <= 0 || channels != 4) return null;
       _trace('createTexture');
       final tex = await app.createTexture(
         w,
         h,
-        textureFormat: rgba ? TextureFormat.RGBA32F : TextureFormat.RGB32F,
+        textureFormat: TextureFormat.RGBA32F,
       );
       try {
         _trace('setLinearImage');
         await tex.setLinearImage(
           image,
-          rgba ? PixelDataFormat.RGBA : PixelDataFormat.RGB,
+          PixelDataFormat.RGBA,
           PixelDataType.FLOAT,
         );
         return tex;
