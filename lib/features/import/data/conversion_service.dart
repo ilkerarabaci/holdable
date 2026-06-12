@@ -17,12 +17,12 @@ const Set<String> kConvertibleExtensions = {
   'igs',
 };
 
-/// Base URL of the conversion service.
-///
-/// Local-Docker dev: the dev machine's LAN IP (the phone and PC share Wi-Fi).
-/// Production: the Cloud Run HTTPS URL — swap this when the service is deployed.
-// TODO(convert): move to build config / remote config; HTTPS in production.
-const String kConversionBaseUrl = 'http://192.168.1.181:8080';
+/// Base URL of the conversion service (Cloud Run, europe-west3). Public HTTPS,
+/// so any device can convert without the dev PC. For local-Docker dev, point
+/// this at the dev machine's LAN IP (and re-enable cleartext in the manifest).
+// TODO(convert): move to build/remote config; add auth before a real launch.
+const String kConversionBaseUrl =
+    'https://holdable-convert-872321921378.europe-west3.run.app';
 
 class ConversionException implements Exception {
   ConversionException(this.message);
