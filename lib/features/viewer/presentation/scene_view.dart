@@ -922,6 +922,16 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       final tex = await app.createTexture(
         w,
         h,
+        // UPLOADABLE is REQUIRED here: createTexture defaults to {SAMPLEABLE}
+        // only, and setLinearImage below then hits Filament's setImage
+        // precondition "Texture is not uploadable" — a NATIVE, uncatchable
+        // abort (the alpha.28–.32 device crash; decode was fixed in .32 but
+        // the upload target was still built without UPLOADABLE). thermion's own
+        // TexturedQuad creates its upload target with both flags; match it.
+        flags: const {
+          TextureUsage.TEXTURE_USAGE_SAMPLEABLE,
+          TextureUsage.TEXTURE_USAGE_UPLOADABLE,
+        },
         textureFormat: TextureFormat.RGBA32F,
       );
       try {
