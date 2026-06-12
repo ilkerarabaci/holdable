@@ -896,65 +896,65 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     }
   }
 
-  /// Decodes [encoded] natively and uploads it into an RGBA32F linear texture.
+  /// Decodes [encoded] to 8-bit RGBA and uploads it into an sRGB8 texture.
   ///
-  /// `requireAlpha: true` is LOAD-BEARING: it forces the native stb decode to
-  /// 4 channels. A 3-channel image (any JPEG, alpha-less PNG — e.g. the
-  /// bundled wood/metal/marble/fabric and ToyCar's livery) would otherwise
-  /// take the RGB/RGB32F path, which thermion's own tests never exercise and
-  /// which Filament ABORTS on natively at `setImage` (the alpha.28–.31 device
-  /// crash; pinned `TTexture.cpp Texture_loadImage` sizes the buffer from the
-  /// channel count and Vulkan rejects 3-channel float). The 4-channel path
-  /// (RGBA32F + RGBA + FLOAT) is exactly what thermion's test-suite uses.
+  /// We deliberately AVOID Filament's float `LinearImage` + `RGBA32F` texture
+  /// path. On real mobile GPUs (confirmed: Qualcomm Adreno 840, GLES 3.2) the
+  /// 32-bit-float texture upload SEGFAULTS inside the vendor GL driver
+  /// (`libGLESv2_adreno.so`) mid-upload — a native, uncatchable SIGSEGV while
+  /// the driver reads the float source buffer (the alpha.33 device crash;
+  /// the emulator never reproduced it because its software GL took a different
+  /// path). 8-bit RGBA via `setImage` is the standard, universally-supported
+  /// route. The image is decoded to straight RGBA8 on the Flutter side (no
+  /// native float decode), then uploaded into an `SRGB8_A8` texture so the GPU
+  /// linearises the base-color map correctly on sample.
+  ///
+  /// (`setImage`'s FFI passes the Dart enum `.index`, but `PixelDataFormat` and
+  /// `PixelDataType` are declared in value order — `RGBA.index == 6 == value`,
+  /// `UBYTE.index == 0 == value` — so the values reach native correctly.)
   Future<Texture?> _createGpuTexture(Uint8List encoded) async {
     final app = FilamentApp.instance!;
-    LinearImage? image;
+    Texture? tex;
     try {
       _trace('decodeImage');
-      image = await app.decodeImage(encoded, requireAlpha: true);
-      _trace('getImageDimensions');
-      final w = await image.getWidth();
-      final h = await image.getHeight();
-      final channels = await image.getChannels();
-      // Anything but the upstream-tested 4-channel layout is a no-go.
-      if (w <= 0 || h <= 0 || channels != 4) return null;
+      final codec = await ui.instantiateImageCodec(encoded);
+      final frame = await codec.getNextFrame();
+      final uiImage = frame.image;
+      final w = uiImage.width;
+      final h = uiImage.height;
+      final bd = await uiImage.toByteData(format: ui.ImageByteFormat.rawRgba);
+      uiImage.dispose();
+      if (bd == null || w <= 0 || h <= 0) return null;
+      final rgba = bd.buffer.asUint8List();
       _trace('createTexture');
-      final tex = await app.createTexture(
+      tex = await app.createTexture(
         w,
         h,
-        // UPLOADABLE is REQUIRED here: createTexture defaults to {SAMPLEABLE}
-        // only, and setLinearImage below then hits Filament's setImage
-        // precondition "Texture is not uploadable" — a NATIVE, uncatchable
-        // abort (the alpha.28–.32 device crash; decode was fixed in .32 but
-        // the upload target was still built without UPLOADABLE). thermion's own
-        // TexturedQuad creates its upload target with both flags; match it.
+        // Both flags are required: SAMPLEABLE to bind it, UPLOADABLE so setImage
+        // is allowed (createTexture defaults to {SAMPLEABLE} only).
         flags: const {
           TextureUsage.TEXTURE_USAGE_SAMPLEABLE,
           TextureUsage.TEXTURE_USAGE_UPLOADABLE,
         },
-        textureFormat: TextureFormat.RGBA32F,
+        textureFormat: TextureFormat.SRGB8_A8,
       );
-      try {
-        _trace('setLinearImage');
-        await tex.setLinearImage(
-          image,
-          PixelDataFormat.RGBA,
-          PixelDataType.FLOAT,
-        );
-        return tex;
-      } catch (_) {
+      _trace('setImage');
+      await tex.setImage(
+        0,
+        rgba,
+        w,
+        h,
+        PixelDataFormat.RGBA,
+        PixelDataType.UBYTE,
+      );
+      return tex;
+    } catch (_) {
+      if (tex != null) {
         try {
           await tex.destroy();
         } catch (_) {}
-        return null;
       }
-    } catch (_) {
       return null;
-    } finally {
-      try {
-        _trace('destroyLinearImage');
-        await image?.destroy();
-      } catch (_) {}
     }
   }
 
