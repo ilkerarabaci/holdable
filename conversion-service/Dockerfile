@@ -24,10 +24,14 @@ RUN curl -fSL "https://download.blender.org/release/Blender${BLENDER_MAJOR}/blen
     && rm /tmp/blender.tar.xz
 ENV PATH="/opt/blender:${PATH}"
 
+# FreeCAD (OpenCASCADE) for STEP/IGES tessellation — provides `freecadcmd`.
+RUN apt-get update && apt-get install -y --no-install-recommends freecad \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY server.py convert.py ./
+COPY server.py convert.py convert_step.py ./
 
 ENV PORT=8080
 EXPOSE 8080

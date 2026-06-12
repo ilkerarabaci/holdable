@@ -20,10 +20,13 @@ if ext == ".blend":
     # Opening a .blend replaces the whole scene with its contents.
     bpy.ops.wm.open_mainfile(filepath=src)
 else:
-    # USD (and future importers): start from a truly empty scene, then import.
+    # Everything else: start from a truly empty scene, then import.
     bpy.ops.wm.read_factory_settings(use_empty=True)
     if ext in (".usd", ".usda", ".usdc", ".usdz"):
         bpy.ops.wm.usd_import(filepath=src)
+    elif ext == ".stl":
+        # The intermediate mesh FreeCAD produces for STEP/IGES.
+        bpy.ops.wm.stl_import(filepath=src)
     else:
         raise SystemExit(f"unsupported extension: {ext}")
 

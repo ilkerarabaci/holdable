@@ -10,7 +10,11 @@ const Set<String> kConvertibleExtensions = {
   'usda',
   'usdc',
   'usdz',
-  // STEP/IGES (FreeCAD) land here once the service grows a CAD path.
+  // CAD B-rep formats (FreeCAD/OpenCASCADE on the service side).
+  'step',
+  'stp',
+  'iges',
+  'igs',
 };
 
 /// Base URL of the conversion service.
