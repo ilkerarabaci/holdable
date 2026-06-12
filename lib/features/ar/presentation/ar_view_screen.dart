@@ -9,7 +9,10 @@ import 'package:ar_flutter_plugin_2/models/ar_anchor.dart';
 import 'package:ar_flutter_plugin_2/models/ar_hittest_result.dart';
 import 'package:ar_flutter_plugin_2/models/ar_node.dart';
 import 'package:ar_flutter_plugin_2/widgets/ar_view.dart';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:vector_math/vector_math_64.dart' as vm;
 
 /// AR-1 "View in AR" (ADR-003): place the model on a real surface, walk around
@@ -175,6 +178,40 @@ class _ArViewScreenState extends State<ArViewScreen> {
     setState(() => _placed = false);
   }
 
+  /// Captures the live AR scene (camera + placed model) and opens the share
+  /// sheet with it as a PNG — so a model-in-your-room shot can be saved or sent.
+  Future<void> _captureAndShare() async {
+    final session = _sessionManager;
+    if (session == null) return;
+    try {
+      final image = await session.snapshot();
+      if (image is! MemoryImage) {
+        _toast("Couldn't capture the AR view.");
+        return;
+      }
+      final dir = await getTemporaryDirectory();
+      final file = File(
+          '${dir.path}/holdable_ar_${DateTime.now().millisecondsSinceEpoch}.png');
+      await file.writeAsBytes(image.bytes);
+      if (!mounted) return;
+      // iPad needs a popover origin; a safe centre rect avoids the RenderSliver
+      // cast pitfall (see library_screen share).
+      Rect? origin;
+      final size = MediaQuery.maybeOf(context)?.size;
+      if (size != null) {
+        origin = Rect.fromCenter(
+            center: size.center(Offset.zero), width: 1, height: 1);
+      }
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'image/png')],
+        subject: widget.title,
+        sharePositionOrigin: origin,
+      );
+    } catch (_) {
+      _toast("Couldn't capture the AR view.");
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -183,6 +220,11 @@ class _ArViewScreenState extends State<ArViewScreen> {
         foregroundColor: Colors.white,
         title: Text(widget.title),
         actions: [
+          IconButton(
+            tooltip: 'Capture & share',
+            onPressed: _captureAndShare,
+            icon: const Icon(Icons.camera_alt_outlined),
+          ),
           if (_placed)
             IconButton(
               tooltip: 'Remove',
