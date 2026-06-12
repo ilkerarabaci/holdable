@@ -477,7 +477,6 @@ class _Panel extends StatelessWidget {
             ConstrainedBox(
               constraints: BoxConstraints(maxHeight: maxContentHeight),
               child: SingleChildScrollView(
-                clipBehavior: Clip.none,
                 child: child,
               ),
             ),
