@@ -218,15 +218,17 @@ void main() {
     expect(bytesToHuman(52428800), '50.0 MB');
   });
 
-  test('share intent keeps only .obj/.stl paths', () {
+  test('share intent keeps native + convertible model paths, drops the rest',
+      () {
     final kept = ImportService.supportedPaths([
       '/in/cube.obj',
       '/in/bracket.STL',
       '/in/notes.pdf',
-      '/in/scene.blend',
+      '/in/scene.blend', // convertible (handled by the conversion service)
       '/in/photo.png',
     ]);
-    expect(kept, ['/in/cube.obj', '/in/bracket.STL']);
+    // .blend is now kept (routed to the conversion service); .pdf/.png are not.
+    expect(kept, ['/in/cube.obj', '/in/bracket.STL', '/in/scene.blend']);
   });
 
   test('sample catalog is non-empty and all .stl/.obj', () {

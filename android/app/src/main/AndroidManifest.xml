@@ -3,6 +3,10 @@
          still installs + runs (viewer only) on non-AR devices. -->
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-feature android:name="android.hardware.camera.ar" android:required="false"/>
+    <!-- The model-conversion service (.blend/USD/STEP -> glb) is reached over
+         the network — now a Cloud Run HTTPS endpoint, so no cleartext needed.
+         (For local-Docker dev over plain http, re-add usesCleartextTraffic.) -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="holdable"
         android:name="${applicationName}"
