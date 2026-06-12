@@ -3,10 +3,16 @@
          still installs + runs (viewer only) on non-AR devices. -->
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-feature android:name="android.hardware.camera.ar" android:required="false"/>
+    <!-- The model-conversion service (.blend/USD/STEP -> glb) is reached over
+         the network. Cleartext is for the local-Docker dev service (plain http
+         on the LAN); production uses the Cloud Run HTTPS URL, so this should be
+         narrowed to a network-security-config / removed before release. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="holdable"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -19,7 +19,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # v0.3 = Thermion (Google Filament) native renderer line. Prior lines kept for
 # rollback: v0.1 WebView (tag v0.1.0-alpha-webview), v0.2 flutter_scene (tag
 # v0.2.0-alpha-flutterscene). See docs/adr-002-renderer-reassessment.md.
-version: 0.3.0+37
+version: 0.3.0+38
 
 environment:
   sdk: ^3.12.0

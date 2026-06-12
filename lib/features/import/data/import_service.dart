@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
+import 'conversion_service.dart';
 
 /// Outcome of an import attempt, surfaced to the UI for feedback.
 enum ImportStatus { added, cancelled, unsupported, duplicate, error }
@@ -29,7 +30,9 @@ class ImportService {
   /// the share-intent handler can be reasoned about and tested without IO.
   static List<String> supportedPaths(Iterable<String> paths) => [
         for (final p in paths)
-          if (ModelFormat.fromExtension(_ext(p)) != null) p,
+          if (ModelFormat.fromExtension(_ext(p)) != null ||
+              kConvertibleExtensions.contains(_ext(p).toLowerCase()))
+            p,
       ];
 
   Future<ImportResult> pickAndImport({
@@ -69,6 +72,12 @@ class ImportService {
       {String? displayName, int? size}) async {
     final format = ModelFormat.fromExtension(_ext(path));
     if (format == null) {
+      // Not natively parseable — but if it's a convertible format (.blend,
+      // USD, …) route it through the conversion service, which returns a glb.
+      final ext = _ext(path).toLowerCase();
+      if (kConvertibleExtensions.contains(ext)) {
+        return _importViaConversion(path, ext, displayName: displayName);
+      }
       return const ImportResult(ImportStatus.unsupported,
           message: 'Supported formats: .obj, .stl, .glb, .gltf, .ply, .3mf, .off, .dae, .3ds, .fbx (ASCII)');
     }
@@ -102,6 +111,48 @@ class ImportService {
       );
       await ref.read(libraryControllerProvider.notifier).add(model);
       return ImportResult(ImportStatus.added, model: model);
+    } catch (e) {
+      return ImportResult(ImportStatus.error, message: '$e');
+    }
+  }
+
+  /// Sends a non-native file ([ext] in [kConvertibleExtensions]) to the
+  /// conversion service, then imports the returned glb as a normal model — so
+  /// the viewer/AR see a plain glb and nothing downstream needs to change.
+  Future<ImportResult> _importViaConversion(String path, String ext,
+      {String? displayName}) async {
+    try {
+      final source = File(path);
+      final name =
+          _baseName(displayName ?? path.split(Platform.pathSeparator).last);
+      final glb =
+          await const ConversionService().convertToGlb(source.readAsBytesSync(), ext);
+
+      if (_isDuplicate(name, glb.length, ModelFormat.glb)) {
+        return ImportResult(ImportStatus.duplicate,
+            message: '"$name" is already in your library.');
+      }
+      final docs = await getApplicationDocumentsDirectory();
+      final modelsDir = Directory('${docs.path}/models');
+      if (!modelsDir.existsSync()) modelsDir.createSync(recursive: true);
+
+      final now = DateTime.now();
+      final id = now.microsecondsSinceEpoch.toString();
+      final dest = '${modelsDir.path}/$id.glb';
+      await File(dest).writeAsBytes(glb);
+
+      final model = LibraryModel(
+        id: id,
+        name: name,
+        format: ModelFormat.glb,
+        sizeBytes: glb.length,
+        filePath: dest,
+        importedAt: now,
+      );
+      await ref.read(libraryControllerProvider.notifier).add(model);
+      return ImportResult(ImportStatus.added, model: model);
+    } on ConversionException catch (e) {
+      return ImportResult(ImportStatus.error, message: e.message);
     } catch (e) {
       return ImportResult(ImportStatus.error, message: '$e');
     }
