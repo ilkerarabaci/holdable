@@ -13,6 +13,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../../app/theme/prism_colors.dart';
 import '../../../app/theme/prism_gradient.dart';
+import '../../../app/theme_controller.dart' show sharedPreferencesProvider;
 import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
 import '../../ar/data/ar_export.dart';
@@ -59,10 +60,33 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   /// under test is identifiable on-device.
   String? _appVersion;
 
+  // Light controls live on the SCREEN (not the Render panel) so they survive
+  // the panel being rebuilt on every tab switch, and — persisted to prefs —
+  // survive re-opening the viewer. (Was: panel-local state that snapped back to
+  // defaults on every rebuild — the "sliders reset on exit/re-enter" bug.)
+  static const _kLightIntensityKey = 'viewer_light_intensity';
+  static const _kLightAngleKey = 'viewer_light_angle';
+  static const _kEnvironmentKey = 'viewer_light_environment';
+  double _lightIntensity = 1.0;
+  double _lightAngle = 0.0;
+  double _environment = 0.0;
+  bool _lightApplied = false; // persisted light pushed to the scene once ready
+
+  void _saveLight() {
+    final prefs = ref.read(sharedPreferencesProvider);
+    prefs.setDouble(_kLightIntensityKey, _lightIntensity);
+    prefs.setDouble(_kLightAngleKey, _lightAngle);
+    prefs.setDouble(_kEnvironmentKey, _environment);
+  }
+
   @override
   void initState() {
     super.initState();
     _model = widget.model;
+    final prefs = ref.read(sharedPreferencesProvider);
+    _lightIntensity = prefs.getDouble(_kLightIntensityKey) ?? 1.0;
+    _lightAngle = prefs.getDouble(_kLightAngleKey) ?? 0.0;
+    _environment = prefs.getDouble(_kEnvironmentKey) ?? 0.0;
     GpuSupport.isSupported().then((ok) {
       if (mounted) setState(() => _gpuSupported = ok);
     });
@@ -87,16 +111,28 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
 
   void _onStatus(ModelSceneStatus status) {
     if (!mounted) return;
+    void apply() {
+      if (!mounted) return;
+      setState(() => _status = status);
+      // Once the scene is up, push the user's persisted light settings onto it
+      // (the scene loads at its own defaults). Only non-default values need a
+      // call; do it once.
+      if (!status.loading && !_lightApplied) {
+        _lightApplied = true;
+        if (_lightIntensity != 1.0) _scene.setLightIntensity(_lightIntensity);
+        if (_lightAngle != 0.0) _scene.setLightAngle(_lightAngle);
+        if (_environment != 0.0) _scene.setEnvironment(_environment);
+      }
+    }
+
     // The scene reports status synchronously from its initState (i.e. during
     // this screen's build) — setState would throw "called during build" and
     // kill the model load before it starts. Defer to the end of the frame.
     if (SchedulerBinding.instance.schedulerPhase ==
         SchedulerPhase.persistentCallbacks) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) setState(() => _status = status);
-      });
+      WidgetsBinding.instance.addPostFrameCallback((_) => apply());
     } else {
-      setState(() => _status = status);
+      apply();
     }
   }
 
@@ -259,9 +295,24 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                   onColor: _scene.setColor,
                   onShading: _scene.setShading,
                   onTexture: _scene.setTextureAsset,
-                  onLightIntensity: _scene.setLightIntensity,
-                  onLightAngle: _scene.setLightAngle,
-                  onEnvironment: _scene.setEnvironment,
+                  intensity: _lightIntensity,
+                  angle: _lightAngle,
+                  environment: _environment,
+                  onLightIntensity: (v) {
+                    _lightIntensity = v;
+                    _scene.setLightIntensity(v);
+                    _saveLight();
+                  },
+                  onLightAngle: (v) {
+                    _lightAngle = v;
+                    _scene.setLightAngle(v);
+                    _saveLight();
+                  },
+                  onEnvironment: (v) {
+                    _environment = v;
+                    _scene.setEnvironment(v);
+                    _saveLight();
+                  },
                 )),
           if (_tab == _Tab.info)
             Positioned(
@@ -405,6 +456,10 @@ class _Panel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.prism;
+    // Cap the panel so it never swallows the viewport: controls scroll inside a
+    // bounded area, leaving the upper ~half of the screen for the model. The
+    // label stays pinned above the scroll region.
+    final maxContentHeight = MediaQuery.sizeOf(context).height * 0.42;
     return Container(
       color: c.surface.withValues(alpha: 0.92),
       padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
@@ -419,7 +474,13 @@ class _Panel extends StatelessWidget {
                     fontFamily: 'monospace', fontSize: 11, letterSpacing: 1,
                     color: c.textMuted)),
             const SizedBox(height: 12),
-            child,
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: maxContentHeight),
+              child: SingleChildScrollView(
+                clipBehavior: Clip.none,
+                child: child,
+              ),
+            ),
           ],
         ),
       ),
@@ -487,6 +548,9 @@ class _RenderPanel extends StatefulWidget {
     required this.onColor,
     required this.onTexture,
     required this.onShading,
+    required this.intensity,
+    required this.angle,
+    required this.environment,
     required this.onLightIntensity,
     required this.onLightAngle,
     required this.onEnvironment,
@@ -499,6 +563,13 @@ class _RenderPanel extends StatefulWidget {
 
   /// Bundled texture asset path, or null for "None" (back to flat color).
   final ValueChanged<String?> onTexture;
+
+  /// Current light values, owned by the parent screen so they survive this
+  /// panel being rebuilt on every tab switch (and are persisted across
+  /// sessions). The sliders seed from these instead of resetting to defaults.
+  final double intensity;
+  final double angle;
+  final double environment;
   final ValueChanged<double> onLightIntensity;
   final ValueChanged<double> onLightAngle;
   final ValueChanged<double> onEnvironment;
@@ -519,9 +590,11 @@ class _RenderPanelState extends State<_RenderPanel> {
 
   Color _current = _neutral;
   String? _textureSel; // selected bundled texture asset path; null = none
-  double _intensity = 1.0; // light-rig multiplier (matches scene default)
-  double _angle = 0.0; // rig azimuth, radians
-  double _environment = 0.0; // IBL environment amount (0 = off, scene default)
+  // Seed from the parent-owned values so the sliders don't snap back to
+  // defaults each time this panel is rebuilt (tab switch / re-open).
+  late double _intensity = widget.intensity; // light-rig multiplier
+  late double _angle = widget.angle; // rig azimuth, radians
+  late double _environment = widget.environment; // IBL amount (0 = off)
 
   void _pick(Color c) {
     // Color and texture are mutually exclusive — picking a color drops the
