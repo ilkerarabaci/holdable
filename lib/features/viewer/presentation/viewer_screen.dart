@@ -456,6 +456,10 @@ class _Panel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.prism;
+    // Cap the panel so it never swallows the viewport: controls scroll inside a
+    // bounded area, leaving the upper ~half of the screen for the model. The
+    // label stays pinned above the scroll region.
+    final maxContentHeight = MediaQuery.sizeOf(context).height * 0.42;
     return Container(
       color: c.surface.withValues(alpha: 0.92),
       padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
@@ -470,7 +474,13 @@ class _Panel extends StatelessWidget {
                     fontFamily: 'monospace', fontSize: 11, letterSpacing: 1,
                     color: c.textMuted)),
             const SizedBox(height: 12),
-            child,
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: maxContentHeight),
+              child: SingleChildScrollView(
+                clipBehavior: Clip.none,
+                child: child,
+              ),
+            ),
           ],
         ),
       ),
