@@ -17,6 +17,7 @@ import '../../../app/theme_controller.dart' show sharedPreferencesProvider;
 import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
 import '../../ar/data/ar_export.dart';
+import '../../ar/presentation/hand_control_screen.dart';
 import '../../ar/presentation/ar_view_screen.dart';
 import '../data/bundled_textures.dart';
 import '../data/gpu_support.dart';
@@ -170,6 +171,28 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     }
     await navigator.push(MaterialPageRoute<void>(
       builder: (_) => ArViewScreen(glbAbsolutePath: name, title: _model.name),
+    ));
+  }
+
+  /// Exports the current model to a temp GLB and opens the hand-tracking POC
+  /// (F4 hero feature) — control the model in mid-air with your hand.
+  Future<void> _openHandControl() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('Preparing hand control…')));
+    final name = await exportModelToGlb(
+      filePath: _model.filePath,
+      format: _model.format.fileExtension,
+    );
+    if (!mounted) return;
+    if (name == null) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text("Couldn't prepare this model.")),
+      );
+      return;
+    }
+    await navigator.push(MaterialPageRoute<void>(
+      builder: (_) => HandControlScreen(glbAbsolutePath: name, title: _model.name),
     ));
   }
 
@@ -334,6 +357,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         // Re-tapping the active tab closes its panel.
         onSelect: (t) => setState(() => _tab = _tab == t ? _Tab.none : t),
         onAr: _openAr,
+        onHand: _openHandControl,
       ),
       ),
     );
@@ -375,10 +399,12 @@ class _UnsupportedGpu extends StatelessWidget {
 }
 
 class _Toolbar extends StatelessWidget {
-  const _Toolbar({required this.current, required this.onSelect, this.onAr});
+  const _Toolbar(
+      {required this.current, required this.onSelect, this.onAr, this.onHand});
   final _Tab current;
   final ValueChanged<_Tab> onSelect;
   final VoidCallback? onAr;
+  final VoidCallback? onHand;
 
   @override
   Widget build(BuildContext context) {
@@ -402,6 +428,8 @@ class _Toolbar extends StatelessWidget {
                 active: current == _Tab.info, onTap: () => onSelect(_Tab.info)),
             _ToolButton(icon: LucideIcons.scan, label: 'AR',
                 tooltip: 'Place the model in your room', onTap: onAr),
+            _ToolButton(icon: LucideIcons.hand, label: 'Hand',
+                tooltip: 'Control the model with your hand (beta)', onTap: onHand),
           ],
         ),
       ),
