@@ -38,9 +38,12 @@ Hand _openHand(double cx, double cy) => _hand(
     );
 
 /// A pinching hand centered at [cx,cy]: thumb tip and index tip coincide.
-Hand _pinchHand(double cx, double cy, {double roll = -math.pi / 2}) {
+/// [span] is the wrist→middle-MCP length (the depth proxy: larger = hand closer
+/// to the camera), used to test one-hand scale.
+Hand _pinchHand(double cx, double cy,
+    {double roll = -math.pi / 2, double span = 0.30}) {
   // Place middle-MCP along [roll] from the wrist so we can drive yaw.
-  const wristToMcp = 0.30;
+  final wristToMcp = span;
   final wx = cx, wy = cy + 0.0;
   final mmx = wx + wristToMcp * math.cos(roll);
   final mmy = wy + wristToMcp * math.sin(roll);
@@ -144,6 +147,27 @@ void main() {
       c.update(HandFrame([_openHand(0.49, 0.5), _openHand(0.51, 0.5)])); // tiny span
       c.update(HandFrame([_openHand(0.0, 0.5), _openHand(1.0, 0.5)])); // huge span
       expect(c.pose.scale, lessThanOrEqualTo(3.0));
+    });
+  });
+
+  group('HandModelController — one-hand depth scale', () {
+    test('pulling the hand closer (bigger span) scales up; pushing away down', () {
+      final c = HandModelController(smoothing: 1.0);
+      c.update(HandFrame([_pinchHand(0.5, 0.5, span: 0.30)])); // grab baseline
+      expect(c.isGrabbing, isTrue);
+      expect(c.pose.scale, closeTo(1.0, 1e-9));
+      // Hand closer → span ×1.5 → scale ~1.5
+      c.update(HandFrame([_pinchHand(0.5, 0.5, span: 0.45)]));
+      expect(c.pose.scale, closeTo(1.5, 0.02));
+      // Hand farther → span ×0.5 of baseline → scale ~0.5
+      c.update(HandFrame([_pinchHand(0.5, 0.5, span: 0.15)]));
+      expect(c.pose.scale, closeTo(0.5, 0.02));
+    });
+
+    test('an open (non-grabbing) hand never changes scale', () {
+      final c = HandModelController(smoothing: 1.0);
+      c.update(HandFrame([_openHand(0.5, 0.5)]));
+      expect(c.pose.scale, 1.0);
     });
   });
 

@@ -273,6 +273,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   static const double _isoAzimuth = math.pi / 4;
   static const double _isoElevation = 0.6;
   static const double _elevationLimit = math.pi / 2 - 0.05;
+  // Every model is uniformly scaled so its bounding sphere has this radius (in
+  // world units), so display size + framing are consistent regardless of the
+  // file's authored units (and tiny models don't fall inside the near clip).
+  static const double _kFitRadius = 1.0;
   // Hand-mode starts the model this much further than the viewer's default
   // framing, so it doesn't fill the frame and has room to be enlarged.
   static const double _kHandFramingPullback = 1.6;
@@ -532,19 +536,35 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       _asset = asset;
       _material = material;
 
+      // Normalize display size: center the model AND uniformly scale it so its
+      // bounding sphere has a fixed radius (_kFitRadius), regardless of the
+      // file's authored units. Without this, a model authored in metres at real
+      // toy scale (e.g. the Khronos ToyCar — bounds ~0.04 units) frames at a
+      // camera distance smaller than the near-clip plane and renders BLANK,
+      // while a unit-scale model fills the view. Scaling to a constant size
+      // makes framing consistent for every model and kills the near-clip
+      // blank-out. Order S·T(-center): translate the centre to the origin, then
+      // scale about it.
+      final modelRadius = p.camDistance / 3.0;
+      final fit = modelRadius > 1e-9 ? _kFitRadius / modelRadius : 1.0;
       await FilamentApp.instance!.setTransform(
         asset.entity,
-        Matrix4.translation(Vector3(-p.centerX, -p.centerY, -p.centerZ)),
+        Matrix4.identity()
+          ..scaleByDouble(fit, fit, fit, 1)
+          ..translateByVector3(Vector3(-p.centerX, -p.centerY, -p.centerZ)),
       );
       await viewer.addToScene(asset);
 
       if (frame) {
-        final modelRadius = p.camDistance / 3.0;
-        _radius = p.camDistance;
+        // The model is normalized to _kFitRadius (see setTransform above), so
+        // framing is fixed in normalized units — same comfortable size for any
+        // model, and the camera always sits well beyond the near-clip plane.
+        const fitCamDistance = _kFitRadius * 3.0;
+        _radius = fitCamDistance;
         _startRadius = _radius;
-        _modelBaseRadius = p.camDistance;
-        _minRadius = math.max(modelRadius * 0.4, 0.05);
-        _maxRadius = p.camDistance * 5.0;
+        _modelBaseRadius = fitCamDistance;
+        _minRadius = _kFitRadius * 0.4;
+        _maxRadius = fitCamDistance * 5.0;
         _azimuth = _isoAzimuth;
         _elevation = _isoElevation;
         _target.setZero();

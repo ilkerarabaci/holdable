@@ -136,6 +136,8 @@ class HandModelController {
   bool _grabbing = false;
   vm.Vector2? _grabPalm0; // palm position when the grab started
   double _grabRoll0 = 0; // wrist roll when the grab started
+  double _grabSpan0 = 0; // hand span (depth proxy) when the grab started
+  double _grabScale0 = 1; // model scale when the grab started
   double _poseTx0 = 0, _poseTy0 = 0, _poseYaw0 = 0; // pose at grab start
 
   // Stretch state (two-hand scale).
@@ -170,6 +172,8 @@ class HandModelController {
         _grabbing = true;
         _grabPalm0 = palm;
         _grabRoll0 = hand.roll;
+        _grabSpan0 = hand.span <= 1e-6 ? 1e-6 : hand.span;
+        _grabScale0 = pose.scale;
         _poseTx0 = pose.tx;
         _poseTy0 = pose.ty;
         _poseYaw0 = pose.yaw;
@@ -182,9 +186,17 @@ class HandModelController {
       final targetTx = (_poseTx0 + (palm.x - p0.x) * 2.0).clamp(-1.0, 1.0);
       final targetTy = (_poseTy0 - (palm.y - p0.y) * 2.0).clamp(-1.0, 1.0);
       final targetYaw = _poseYaw0 + _angleDelta(_grabRoll0, hand.roll);
+      // ONE-HAND scale via depth: the hand's apparent size (span) grows as it
+      // moves toward the camera. So while grabbing, pull the hand closer to
+      // enlarge / push away to shrink — no second hand needed (the other hand
+      // holds the phone). Lateral moves keep span ~constant, so translate and
+      // scale stay largely independent.
+      final targetScale =
+          (_grabScale0 * (hand.span / _grabSpan0)).clamp(minScale, maxScale);
       pose.tx = _lerp(pose.tx, targetTx);
       pose.ty = _lerp(pose.ty, targetTy);
       pose.yaw = _lerpAngle(pose.yaw, targetYaw);
+      pose.scale = _lerp(pose.scale, targetScale);
     } else {
       // Released — leave the model where it is.
       _grabbing = false;

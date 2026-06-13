@@ -275,7 +275,8 @@ class _Hint extends StatelessWidget {
     return const Center(
       child: _Chip(
         child: Text(
-          'Pinch to grab & move • twist wrist to rotate • two hands to resize',
+          'Pinch to grab — move it, twist your wrist to rotate, '
+          'pull closer / push away to resize',
           textAlign: TextAlign.center,
           style: TextStyle(color: Colors.white, fontSize: 13),
         ),
