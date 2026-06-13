@@ -8,9 +8,21 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val gpuChannel = "holdable/gpu"
+    private var handTracker: HandTracker? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        // F4 hand-tracking POC: native CameraX + MediaPipe HandLandmarker. Uses
+        // the engine's renderer as the Flutter TextureRegistry (for the camera
+        // preview texture) and this activity as the CameraX LifecycleOwner.
+        handTracker = HandTracker(
+            context = this,
+            textureRegistry = flutterEngine.renderer,
+            lifecycleOwner = this,
+            messenger = flutterEngine.dartExecutor.binaryMessenger,
+        )
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, gpuChannel)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -52,5 +64,11 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        handTracker?.stop()
+        handTracker = null
+        super.cleanUpFlutterEngine(flutterEngine)
     }
 }
