@@ -17,7 +17,7 @@ import '../../../app/theme_controller.dart' show sharedPreferencesProvider;
 import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
 import '../../ar/data/ar_export.dart';
-import '../../ar/presentation/hand_control_screen.dart';
+import '../../ar/presentation/hand_control_overlay.dart';
 import '../../ar/presentation/ar_view_screen.dart';
 import '../data/bundled_textures.dart';
 import '../data/gpu_support.dart';
@@ -47,6 +47,9 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   // Open clean (model unobstructed); panels are dismissible overlays toggled
   // from the toolbar, closed by back / tapping the scene.
   _Tab _tab = _Tab.none;
+  // F4 hand-tracking: an overlay MODE over this screen's single model scene
+  // (NOT a separate viewer — two Thermion viewers blank each other out).
+  bool _handMode = false;
   ModelSceneStatus _status = const ModelSceneStatus(loading: true);
 
   /// null = still checking, false = device GPU can't run the native viewer.
@@ -174,26 +177,13 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     ));
   }
 
-  /// Exports the current model to a temp GLB and opens the hand-tracking POC
-  /// (F4 hero feature) — control the model in mid-air with your hand.
-  Future<void> _openHandControl() async {
-    final messenger = ScaffoldMessenger.of(context);
-    final navigator = Navigator.of(context);
-    messenger.showSnackBar(const SnackBar(content: Text('Preparing hand control…')));
-    final name = await exportModelToGlb(
-      filePath: _model.filePath,
-      format: _model.format.fileExtension,
-    );
-    if (!mounted) return;
-    if (name == null) {
-      messenger.showSnackBar(
-        const SnackBar(content: Text("Couldn't prepare this model.")),
-      );
-      return;
-    }
-    await navigator.push(MaterialPageRoute<void>(
-      builder: (_) => HandControlScreen(glbAbsolutePath: name, title: _model.name),
-    ));
+  /// Enters hand-tracking control (F4 hero feature) — an overlay over THIS
+  /// screen's model scene (gestures drive [_scene]); not a second viewer.
+  void _openHandControl() {
+    setState(() {
+      _tab = _Tab.none; // close any open panel
+      _handMode = true;
+    });
   }
 
   /// Diagnostic: a previous session died inside the texture pipeline; show
@@ -350,6 +340,12 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                   mem: _mem,
                   appVersion: _appVersion,
                 )),
+          // F4 hand-tracking overlay — drives _scene; model renders underneath.
+          if (_handMode)
+            HandControlOverlay(
+              scene: _scene,
+              onClose: () => setState(() => _handMode = false),
+            ),
         ],
       ),
       bottomNavigationBar: _Toolbar(

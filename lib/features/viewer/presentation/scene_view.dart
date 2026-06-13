@@ -48,6 +48,17 @@ class ModelSceneController {
   void setRenderMode(String mode) => _state?._setRenderMode(mode);
   void setView(String preset) => _state?._setPreset(preset);
 
+  /// Hand-tracking control (F4): drive the framing from a gesture pose instead
+  /// of touch. [yaw] rotates the model (orbit azimuth), [scale] zooms (≥1 =
+  /// bigger), [tx]/[ty] pan it in-frame (normalized −1..1). See hand_gesture.dart.
+  void setHandPose({
+    required double yaw,
+    required double scale,
+    required double tx,
+    required double ty,
+  }) =>
+      _state?._setHandPose(yaw, scale, tx, ty);
+
   /// Sets the model's base color (the surface tint the light shades).
   void setColor(Color color) => _state?._setColor(color);
 
@@ -248,6 +259,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   double _minRadius = 0.5;
   double _maxRadius = 50;
   double _startRadius = 5;
+  // Framing distance at which the model fills the view at scale 1.0 — the base
+  // for hand-pose zoom (see _setHandPose). Captured when the camera frames.
+  double _modelBaseRadius = 5;
 
   /// Camera pivot, shifted by two-finger pan so the model can be moved up out
   /// from behind the bottom panel (or recentered). Origin = model center.
@@ -259,6 +273,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   static const double _isoAzimuth = math.pi / 4;
   static const double _isoElevation = 0.6;
   static const double _elevationLimit = math.pi / 2 - 0.05;
+  // Hand-mode starts the model this much further than the viewer's default
+  // framing, so it doesn't fill the frame and has room to be enlarged.
+  static const double _kHandFramingPullback = 1.6;
   static const double _rotSpeed = 0.01; // rad per px
   static const double _panSpeed = 0.0015; // world units per px, scaled by radius
   static const double _xrayAlpha = 0.35;
@@ -525,6 +542,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         final modelRadius = p.camDistance / 3.0;
         _radius = p.camDistance;
         _startRadius = _radius;
+        _modelBaseRadius = p.camDistance;
         _minRadius = math.max(modelRadius * 0.4, 0.05);
         _maxRadius = p.camDistance * 5.0;
         _azimuth = _isoAzimuth;
@@ -673,6 +691,34 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     }
     _target.setZero(); // recenter when snapping to a preset
     await _applyCameraNow();
+  }
+
+  /// Drives the framing from a hand-gesture pose (F4). Maps the controller's
+  /// model-space pose onto the orbit camera: [yaw] → azimuth (the model appears
+  /// to spin with the wrist), [scale] → distance (≥1 zooms in / bigger), and
+  /// [tx]/[ty] (normalized −1..1) → an in-frame pan via the camera right/up axes.
+  void _setHandPose(double yaw, double scale, double tx, double ty) {
+    _azimuth = _isoAzimuth - yaw;
+    _elevation = _isoElevation;
+    final s = scale.clamp(0.25, 4.0);
+    // Start pulled back from the viewer's tight default framing (×1.6) so the
+    // model has breathing room in hand mode — it fills the frame otherwise, and
+    // there's nowhere to "grow" it. Two-hand stretch (s>1) zooms back in.
+    _radius =
+        (_modelBaseRadius * _kHandFramingPullback / s).clamp(_minRadius, _maxRadius);
+    // Pan basis from the (just-set) orbit orientation.
+    _target.setZero();
+    final forward = (-_orbitOffset()).normalized();
+    final right = forward.cross(Vector3(0, 1, 0));
+    if (right.length2 > 1e-9) {
+      right.normalize();
+      final camUp = right.cross(forward)..normalize();
+      final k = _modelBaseRadius * 0.5; // full -1..1 ≈ half the framing distance
+      _target
+        ..add(right * (tx * k))
+        ..add(camUp * (ty * k));
+    }
+    _requestCamera();
   }
 
   /// Writes the current base color (sRGB → linear) into [mi] at the mode alpha.
