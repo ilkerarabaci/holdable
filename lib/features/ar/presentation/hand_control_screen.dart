@@ -2,26 +2,32 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../../viewer/presentation/scene_view.dart';
 import '../data/hand_landmarker_channel.dart';
 import '../domain/hand_gesture.dart';
 
-/// F4 hand-tracking POC (the hero feature) — "your 3D, in your hand."
+/// F4 hand-tracking — "your 3D, in your hand."
 ///
-/// SPIKE SCOPE (iteration 1): prove the control loop end-to-end on a real
-/// device — native MediaPipe emits hand landmarks, the [HandModelController]
-/// turns them into a 6DoF pose, and an object on screen follows the hand
-/// (pinch-grab to move + wrist-rotate, two hands to scale). It renders the live
-/// camera, the detected hand skeleton, and a proxy model driven by the gesture
-/// pose. Iteration 2 swaps the proxy for the real Thermion-rendered model and
-/// polishes preview orientation; that's why [glbAbsolutePath] is carried here.
+/// Iteration 2: the REAL model (rendered by the proven Thermion [ModelSceneView])
+/// is driven by hand gestures — pinch-grab to move + wrist-twist to rotate, two
+/// hands to resize. The live camera + detected hand skeleton sit in a corner
+/// picture-in-picture so you can aim and see the tracking. (Placing the model
+/// over the live camera as an AR overlay needs a transparent Filament swapchain,
+/// which this thermion version doesn't expose — that lands with the ARCore AR
+/// epic. This mode is gesture *manipulation* of the model, distinct from AR
+/// placement.)
 class HandControlScreen extends StatefulWidget {
   const HandControlScreen({
     super.key,
-    required this.glbAbsolutePath,
+    required this.filePath,
+    required this.format,
     required this.title,
   });
 
-  final String glbAbsolutePath;
+  /// The model's own file + format — rendered at full fidelity (textures and
+  /// all), no glb round-trip needed.
+  final String filePath;
+  final String format;
   final String title;
 
   @override
@@ -31,12 +37,14 @@ class HandControlScreen extends StatefulWidget {
 class _HandControlScreenState extends State<HandControlScreen> {
   final HandLandmarkerChannel _channel = HandLandmarkerChannel();
   final HandModelController _controller = HandModelController();
+  final ModelSceneController _scene = ModelSceneController();
 
   StreamSubscription<HandFrame>? _sub;
   int? _textureId;
   HandFrame _lastFrame = HandFrame.empty;
   String? _error;
   bool _starting = true;
+  bool _sceneLoading = true;
 
   @override
   void initState() {
@@ -75,11 +83,15 @@ class _HandControlScreenState extends State<HandControlScreen> {
   }
 
   void _onFrame(HandFrame frame) {
-    _controller.update(frame);
-    if (mounted) {
-      // The pose lives on the controller; setState just repaints with it.
-      setState(() => _lastFrame = frame);
-    }
+    final pose = _controller.update(frame);
+    // Drive the real model's framing from the gesture pose.
+    _scene.setHandPose(
+      yaw: pose.yaw,
+      scale: pose.scale,
+      tx: pose.tx,
+      ty: pose.ty,
+    );
+    if (mounted) setState(() => _lastFrame = frame);
   }
 
   @override
@@ -91,9 +103,8 @@ class _HandControlScreenState extends State<HandControlScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final pose = _controller.pose;
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: const Color(0xFF0E0E12),
       appBar: AppBar(
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
@@ -108,129 +119,113 @@ class _HandControlScreenState extends State<HandControlScreen> {
       ),
       body: _error != null
           ? _ErrorView(message: _error!)
-          : _starting || _textureId == null
-              ? const Center(
-                  child: CircularProgressIndicator(color: Colors.white))
-              : LayoutBuilder(
-                  builder: (context, constraints) {
-                    final size = Size(constraints.maxWidth, constraints.maxHeight);
-                    return Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        // Live camera preview (native CameraX → Flutter texture).
-                        Texture(textureId: _textureId!),
-                        // Detected hand skeleton, mapped from normalized coords.
-                        CustomPaint(
-                          painter: _SkeletonPainter(_lastFrame),
-                          size: size,
-                        ),
-                        // Proxy model that follows the gesture pose. (Iteration
-                        // 2: the real 3D model.)
-                        _ProxyModel(pose: pose, viewport: size),
-                        // Gesture HUD — makes the on-device proof legible.
-                        _Hud(
-                          frame: _lastFrame,
-                          controller: _controller,
-                        ),
-                        const Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 18,
-                          child: _Hint(),
-                        ),
-                      ],
-                    );
+          : Stack(
+              fit: StackFit.expand,
+              children: [
+                // The real model, full-screen, driven by the hand pose.
+                ModelSceneView(
+                  controller: _scene,
+                  filePath: widget.filePath,
+                  format: widget.format,
+                  background: const Color(0xFF0E0E12),
+                  onStatus: (s) {
+                    if (mounted && s.loading != _sceneLoading) {
+                      setState(() => _sceneLoading = s.loading);
+                    }
                   },
                 ),
+                if (_sceneLoading || _starting)
+                  const Center(
+                      child: CircularProgressIndicator(color: Colors.white)),
+                // Camera + hand-skeleton picture-in-picture (tracking feedback).
+                if (_textureId != null)
+                  Positioned(
+                    right: 14,
+                    bottom: 96,
+                    child: _CameraPip(
+                      textureId: _textureId!,
+                      frame: _lastFrame,
+                    ),
+                  ),
+                _Hud(frame: _lastFrame, controller: _controller),
+                const Positioned(
+                    left: 0, right: 0, bottom: 18, child: _Hint()),
+              ],
+            ),
     );
   }
 }
 
-/// Draws the 21-landmark hand skeleton over the preview.
+/// Small live-camera box (bottom corner) with the detected hand skeleton drawn
+/// over it — lets the user aim their hand and confirm tracking.
+class _CameraPip extends StatelessWidget {
+  const _CameraPip({required this.textureId, required this.frame});
+  final int textureId;
+  final HandFrame frame;
+
+  @override
+  Widget build(BuildContext context) {
+    const w = 132.0, h = 176.0;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: SizedBox(
+        width: w,
+        height: h,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Texture(textureId: textureId),
+            CustomPaint(painter: _SkeletonPainter(frame)),
+            // A subtle border so the PiP reads as a distinct panel.
+            DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.35), width: 1),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Draws the 21-landmark hand skeleton, normalized coords → the paint box.
 class _SkeletonPainter extends CustomPainter {
   _SkeletonPainter(this.frame);
   final HandFrame frame;
 
-  // MediaPipe hand connections (bone pairs).
   static const List<List<int>> _bones = [
-    [0, 1], [1, 2], [2, 3], [3, 4], // thumb
-    [0, 5], [5, 6], [6, 7], [7, 8], // index
-    [5, 9], [9, 10], [10, 11], [11, 12], // middle
-    [9, 13], [13, 14], [14, 15], [15, 16], // ring
-    [13, 17], [17, 18], [18, 19], [19, 20], // pinky
-    [0, 17], // palm base
+    [0, 1], [1, 2], [2, 3], [3, 4],
+    [0, 5], [5, 6], [6, 7], [7, 8],
+    [5, 9], [9, 10], [10, 11], [11, 12],
+    [9, 13], [13, 14], [14, 15], [15, 16],
+    [13, 17], [17, 18], [18, 19], [19, 20],
+    [0, 17],
   ];
 
   @override
   void paint(Canvas canvas, Size size) {
     final bone = Paint()
       ..color = const Color(0xFF6EE7F0)
-      ..strokeWidth = 3
+      ..strokeWidth = 2
       ..strokeCap = StrokeCap.round;
     final joint = Paint()..color = const Color(0xFFB388FF);
-
     for (final hand in frame.hands) {
-      Offset at(int i) =>
-          Offset(hand.landmarks[i].x * size.width, hand.landmarks[i].y * size.height);
+      Offset at(int i) => Offset(
+          hand.landmarks[i].x * size.width, hand.landmarks[i].y * size.height);
       for (final b in _bones) {
         canvas.drawLine(at(b[0]), at(b[1]), bone);
       }
       for (var i = 0; i < 21; i++) {
-        canvas.drawCircle(at(i), i == 4 || i == 8 ? 7 : 4, joint);
+        canvas.drawCircle(at(i), i == 4 || i == 8 ? 4 : 2.5, joint);
       }
     }
   }
 
   @override
   bool shouldRepaint(_SkeletonPainter old) => old.frame != frame;
-}
-
-/// A simple 3D-looking cube proxy that translates/scales/rotates with the pose,
-/// proving the gesture→6DoF mapping visually without the renderer in the loop.
-class _ProxyModel extends StatelessWidget {
-  const _ProxyModel({required this.pose, required this.viewport});
-  final ModelPose pose;
-  final Size viewport;
-
-  @override
-  Widget build(BuildContext context) {
-    final base = math.min(viewport.width, viewport.height) * 0.28;
-    final dx = pose.tx * viewport.width * 0.42;
-    final dy = -pose.ty * viewport.height * 0.42; // ty is up-positive
-    return Center(
-      child: Transform.translate(
-        offset: Offset(dx, dy),
-        child: Transform(
-          alignment: Alignment.center,
-          transform: Matrix4.identity()
-            ..setEntry(3, 2, 0.0015) // a little perspective
-            ..rotateX(0.5)
-            ..rotateY(pose.yaw)
-            ..scaleByDouble(pose.scale, pose.scale, pose.scale, 1),
-          child: Container(
-            width: base,
-            height: base,
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [Color(0xFF8B5CF6), Color(0xFF22D3EE)],
-              ),
-              borderRadius: BorderRadius.circular(14),
-              boxShadow: [
-                BoxShadow(
-                  color: const Color(0xFF22D3EE).withValues(alpha: 0.4),
-                  blurRadius: 30,
-                  spreadRadius: 4,
-                ),
-              ],
-            ),
-            child: const Icon(Icons.view_in_ar, color: Colors.white70, size: 48),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 class _Hud extends StatelessWidget {
@@ -242,7 +237,7 @@ class _Hud extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = controller.pose;
     final state = controller.isStretching
-        ? 'STRETCH (scale)'
+        ? 'STRETCH (resize)'
         : controller.isGrabbing
             ? 'GRAB (move/rotate)'
             : frame.hasHand
@@ -260,7 +255,10 @@ class _Hud extends StatelessWidget {
         ),
         child: DefaultTextStyle(
           style: const TextStyle(
-              color: Colors.white, fontSize: 12, height: 1.4, fontFamily: 'monospace'),
+              color: Colors.white,
+              fontSize: 12,
+              height: 1.4,
+              fontFamily: 'monospace'),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -315,9 +313,7 @@ class _ErrorView extends StatelessWidget {
                 style: const TextStyle(color: Colors.white70)),
             const SizedBox(height: 16),
             TextButton(
-              onPressed: openAppSettings,
-              child: const Text('Open settings'),
-            ),
+                onPressed: openAppSettings, child: const Text('Open settings')),
           ],
         ),
       ),

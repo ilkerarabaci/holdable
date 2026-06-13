@@ -174,25 +174,16 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     ));
   }
 
-  /// Exports the current model to a temp GLB and opens the hand-tracking POC
-  /// (F4 hero feature) — control the model in mid-air with your hand.
-  Future<void> _openHandControl() async {
-    final messenger = ScaffoldMessenger.of(context);
-    final navigator = Navigator.of(context);
-    messenger.showSnackBar(const SnackBar(content: Text('Preparing hand control…')));
-    final name = await exportModelToGlb(
-      filePath: _model.filePath,
-      format: _model.format.fileExtension,
-    );
-    if (!mounted) return;
-    if (name == null) {
-      messenger.showSnackBar(
-        const SnackBar(content: Text("Couldn't prepare this model.")),
-      );
-      return;
-    }
-    await navigator.push(MaterialPageRoute<void>(
-      builder: (_) => HandControlScreen(glbAbsolutePath: name, title: _model.name),
+  /// Opens the hand-tracking control screen (F4 hero feature) — manipulate the
+  /// model with hand gestures. Renders the model's own file directly (the same
+  /// Thermion renderer as the viewer), so no glb export is needed.
+  void _openHandControl() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => HandControlScreen(
+        filePath: _model.filePath,
+        format: _model.format.fileExtension,
+        title: _model.name,
+      ),
     ));
   }
 
