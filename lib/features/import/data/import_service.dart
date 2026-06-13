@@ -238,11 +238,13 @@ class ImportService {
 /// against accidentally importing something that loads slowly / runs hot.
 const kMaxImportBytes = 60 * 1024 * 1024;
 
-/// Hard cap on what we'll upload for cloud conversion. This is the FREE-tier
-/// limit; paid raises it to the service hard cap (200 MB). Checked client-side
-/// so a doomed upload doesn't burn the user's mobile data before the server
-/// 413s it. TODO(tier): gate by entitlement when paid tiers ship.
-const kMaxConvertUploadBytes = 50 * 1024 * 1024;
+/// Hard cap on what we'll upload for cloud conversion. Cloud Run rejects any
+/// HTTP/1 request body over 32 MiB at the ingress (before our Flask handler
+/// ever runs), so anything larger fails with a confusing platform 413. Cap a
+/// little under that so the app gives a clear message instead. (Supporting the
+/// 50/200 MB tiers needs a GCS-upload path that bypasses the request-size
+/// limit — see TODO(convert-large).)
+const kMaxConvertUploadBytes = 31 * 1024 * 1024;
 
 /// Proprietary / closed CAD formats we deliberately do NOT convert: there's no
 /// open reader (FreeCAD/OpenCASCADE can't parse them — they'd need a licensed
