@@ -163,7 +163,13 @@ def convert():
                          as_attachment=True, download_name="model.glb")
     except ConvertError as e:
         return jsonify(error=e.message, log=e.log), e.status
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        # Log whatever Blender printed before the kill — the convert.py phase
+        # timing tells us whether LOAD or EXPORT blew the budget.
+        partial = (e.stderr or e.stdout or b"")
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        print("[timeout]\n" + partial[-2000:], flush=True)
         return jsonify(error="conversion timed out"), 504
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -223,7 +229,13 @@ def convert_gcs():
         return jsonify(downloadUrl=_signed_url(ob, "GET"), sizeBytes=size)
     except ConvertError as e:
         return jsonify(error=e.message, log=e.log), e.status
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        # Log whatever Blender printed before the kill — the convert.py phase
+        # timing tells us whether LOAD or EXPORT blew the budget.
+        partial = (e.stderr or e.stdout or b"")
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        print("[timeout]\n" + partial[-2000:], flush=True)
         return jsonify(error="conversion timed out"), 504
     except Exception as e:  # noqa: BLE001
         return jsonify(error=f"gcs convert failed: {e}"), 500
