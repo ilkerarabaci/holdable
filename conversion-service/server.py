@@ -37,7 +37,9 @@ FREECAD_EXTS = {".step", ".stp", ".iges", ".igs"}
 SUPPORTED_EXTS = BLENDER_EXTS | FREECAD_EXTS
 
 # A single conversion shouldn't run forever (a runaway import / heavy tessellate).
-CONVERT_TIMEOUT_S = 240
+# Env-configurable so it can be tuned on redeploy without a rebuild. Keep it
+# below the gunicorn worker timeout (Dockerfile -t) and the Cloud Run --timeout.
+CONVERT_TIMEOUT_S = int(os.environ.get("CONVERT_TIMEOUT_S", "240"))
 
 # GCS bucket for the large-file path (set via the CONVERT_BUCKET env on deploy).
 BUCKET_NAME = os.environ.get("CONVERT_BUCKET", "")

@@ -37,6 +37,23 @@ class ConversionException implements Exception {
   String toString() => message;
 }
 
+/// A user-readable message for a non-200 from the conversion service. 504 means
+/// the conversion ran past the time limit — almost always a very heavy scene;
+/// point the user at exporting a glb themselves rather than retrying forever.
+ConversionException _httpError(int code) {
+  if (code == 504) {
+    return ConversionException(
+        'This model is too complex to convert automatically. In your 3D app, '
+        'export it as glTF/.glb and import that instead.');
+  }
+  if (code == 422) {
+    return ConversionException(
+        "Couldn't convert this model — it may be corrupt or in an "
+        'unsupported variant.');
+  }
+  return ConversionException('Conversion failed (HTTP $code).');
+}
+
 /// Uploads an unsupported model to the conversion service and gets back glb
 /// bytes. Pure transport — the caller persists/imports the result.
 class ConversionService {
@@ -61,7 +78,7 @@ class ConversionService {
       final resp = await req.close().timeout(const Duration(seconds: 240));
       final out = await _collect(resp);
       if (resp.statusCode != 200) {
-        throw ConversionException('Conversion failed (HTTP ${resp.statusCode}).');
+        throw _httpError(resp.statusCode);
       }
       return _validateGlb(out);
     } on SocketException {
@@ -85,7 +102,7 @@ class ConversionService {
       final urlResp = await urlReq.close().timeout(const Duration(seconds: 30));
       final urlBody = await _collectString(urlResp);
       if (urlResp.statusCode != 200) {
-        throw ConversionException('Conversion failed (HTTP ${urlResp.statusCode}).');
+        throw _httpError(urlResp.statusCode);
       }
       final signed = jsonDecode(urlBody) as Map<String, dynamic>;
       final uploadUrl = signed['uploadUrl'] as String?;
@@ -115,7 +132,7 @@ class ConversionService {
       if (convResp.headers.contentType?.mimeType == 'application/json') {
         final body = await _collectString(convResp);
         if (convResp.statusCode != 200) {
-          throw ConversionException('Conversion failed (HTTP ${convResp.statusCode}).');
+          throw _httpError(convResp.statusCode);
         }
         final r = jsonDecode(body) as Map<String, dynamic>;
         final dl = r['downloadUrl'] as String?;
@@ -124,7 +141,7 @@ class ConversionService {
       }
       final out = await _collect(convResp);
       if (convResp.statusCode != 200) {
-        throw ConversionException('Conversion failed (HTTP ${convResp.statusCode}).');
+        throw _httpError(convResp.statusCode);
       }
       return _validateGlb(out);
     } on SocketException {
