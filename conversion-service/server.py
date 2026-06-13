@@ -86,6 +86,9 @@ def _convert_to_glb(work, src, ext):
         proc = _run_blender(stl, out)
     else:
         proc = _run_blender(src, out)
+    # Surface Blender's tail (timing lines from convert.py, warnings) to the
+    # Cloud Run logs even on success — handy for diagnosing slow conversions.
+    print("[blender]\n" + (proc.stderr or proc.stdout or "")[-2000:], flush=True)
     if not os.path.exists(out) or os.path.getsize(out) == 0:
         tail = (proc.stdout[-1500:] + "\n" + proc.stderr[-1500:]).strip()
         raise ConvertError("conversion produced no output", 422, tail)
