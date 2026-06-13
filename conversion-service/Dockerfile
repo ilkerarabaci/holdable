@@ -13,10 +13,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 libsm6 libice6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Pinned Blender LTS (has glTF export + USD import built in). Override at build
-# time with --build-arg if the patch URL moves.
-ARG BLENDER_MAJOR=4.2
-ARG BLENDER_VERSION=4.2.3
+# Pinned Blender (has glTF export + USD import built in). Override at build time
+# with --build-arg if the patch URL moves. Bumped 4.2.3 → 5.0.1: Blender can't
+# read files saved by a NEWER version, and users now save with Blender 5.x
+# (a 5.0 .blend made 4.2.3 fail with "not a blend file"). 5.0.1 reads 5.0 files.
+ARG BLENDER_MAJOR=5.0
+ARG BLENDER_VERSION=5.0.1
 RUN curl -fSL "https://download.blender.org/release/Blender${BLENDER_MAJOR}/blender-${BLENDER_VERSION}-linux-x64.tar.xz" \
         -o /tmp/blender.tar.xz \
     && mkdir -p /opt/blender \
@@ -35,6 +37,8 @@ COPY server.py convert.py convert_step.py ./
 
 ENV PORT=8080
 EXPOSE 8080
-# Shell form so ${PORT} expands (Cloud Run sets it). Long timeout: a Blender
-# conversion can take a while; few workers since each spawns a heavy subprocess.
-CMD gunicorn -b 0.0.0.0:${PORT} -w 2 -t 300 server:app
+# Shell form so ${PORT} expands (Cloud Run sets it). Worker timeout must exceed
+# the longest conversion (CONVERT_TIMEOUT_S) — heavy scenes can take many
+# minutes. One worker: each conversion spawns a heavy Blender subprocess and the
+# service runs at Cloud Run concurrency=1 anyway.
+CMD gunicorn -b 0.0.0.0:${PORT} -w 1 -t 1800 server:app

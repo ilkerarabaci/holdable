@@ -238,11 +238,11 @@ class ImportService {
 /// against accidentally importing something that loads slowly / runs hot.
 const kMaxImportBytes = 60 * 1024 * 1024;
 
-/// Hard cap on what we'll upload for cloud conversion. This is the FREE-tier
-/// limit; paid raises it to the service hard cap (200 MB). Checked client-side
-/// so a doomed upload doesn't burn the user's mobile data before the server
-/// 413s it. TODO(tier): gate by entitlement when paid tiers ship.
-const kMaxConvertUploadBytes = 50 * 1024 * 1024;
+/// Hard cap on what we'll upload for cloud conversion. Large files now go via
+/// the GCS-upload path (which bypasses Cloud Run's 32 MiB request limit), so
+/// this is the product cap, not a transport one. 200 MB = the paid-tier ceiling.
+/// TODO(tier): drop to ~50 MB for free once entitlements ship.
+const kMaxConvertUploadBytes = 200 * 1024 * 1024;
 
 /// Proprietary / closed CAD formats we deliberately do NOT convert: there's no
 /// open reader (FreeCAD/OpenCASCADE can't parse them — they'd need a licensed
