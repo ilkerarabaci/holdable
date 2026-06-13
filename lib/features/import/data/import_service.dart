@@ -78,6 +78,12 @@ class ImportService {
       if (kConvertibleExtensions.contains(ext)) {
         return _importViaConversion(path, ext, displayName: displayName);
       }
+      if (kUnsupportedCadExtensions.contains(ext)) {
+        return ImportResult(ImportStatus.unsupported,
+            message:
+                "Holdable can't open .$ext directly. Export a STEP (.step) or "
+                'IGES (.iges) file from your CAD tool and import that instead.');
+      }
       return const ImportResult(ImportStatus.unsupported,
           message: 'Supported formats: .obj, .stl, .glb, .gltf, .ply, .3mf, .off, .dae, .3ds, .fbx (ASCII)');
     }
@@ -125,6 +131,16 @@ class ImportService {
       final source = File(path);
       final name =
           _baseName(displayName ?? path.split(Platform.pathSeparator).last);
+      // Guard the upload before it leaves the device: cloud conversion is
+      // capped (free tier) and the server hard-caps at 200 MB anyway, so fail
+      // fast with a clear message rather than burning data on a doomed upload.
+      final bytes = source.lengthSync();
+      if (bytes > kMaxConvertUploadBytes) {
+        final mb = (bytes / (1024 * 1024)).round();
+        final cap = kMaxConvertUploadBytes ~/ (1024 * 1024);
+        return ImportResult(ImportStatus.error,
+            message: 'This file is ${mb}MB. Conversion is limited to ${cap}MB.');
+      }
       final glb =
           await const ConversionService().convertToGlb(source.readAsBytesSync(), ext);
 
@@ -221,5 +237,25 @@ class ImportService {
 /// sits near the 200 MB PSS budget (docs/perf-w3-baseline.md), so this guards
 /// against accidentally importing something that loads slowly / runs hot.
 const kMaxImportBytes = 60 * 1024 * 1024;
+
+/// Hard cap on what we'll upload for cloud conversion. This is the FREE-tier
+/// limit; paid raises it to the service hard cap (200 MB). Checked client-side
+/// so a doomed upload doesn't burn the user's mobile data before the server
+/// 413s it. TODO(tier): gate by entitlement when paid tiers ship.
+const kMaxConvertUploadBytes = 50 * 1024 * 1024;
+
+/// Proprietary / closed CAD formats we deliberately do NOT convert: there's no
+/// open reader (FreeCAD/OpenCASCADE can't parse them — they'd need a licensed
+/// commercial engine). When one is imported we point the user at the
+/// interchange formats we DO support (STEP/IGES), which every CAD tool exports.
+const Set<String> kUnsupportedCadExtensions = {
+  'sldprt', 'sldasm', // SolidWorks
+  'ipt', 'iam', // Inventor
+  'catpart', 'catproduct', // CATIA
+  'f3d', 'f3z', // Fusion 360
+  'dwg', 'dxf', // AutoCAD (and mostly 2D)
+  'x_t', 'x_b', // Parasolid
+  'sat', // ACIS
+};
 
 final importServiceProvider = Provider<ImportService>(ImportService.new);
