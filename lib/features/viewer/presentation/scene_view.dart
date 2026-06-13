@@ -273,6 +273,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   static const double _isoAzimuth = math.pi / 4;
   static const double _isoElevation = 0.6;
   static const double _elevationLimit = math.pi / 2 - 0.05;
+  // Hand-mode starts the model this much further than the viewer's default
+  // framing, so it doesn't fill the frame and has room to be enlarged.
+  static const double _kHandFramingPullback = 1.6;
   static const double _rotSpeed = 0.01; // rad per px
   static const double _panSpeed = 0.0015; // world units per px, scaled by radius
   static const double _xrayAlpha = 0.35;
@@ -698,7 +701,11 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     _azimuth = _isoAzimuth - yaw;
     _elevation = _isoElevation;
     final s = scale.clamp(0.25, 4.0);
-    _radius = (_modelBaseRadius / s).clamp(_minRadius, _maxRadius);
+    // Start pulled back from the viewer's tight default framing (×1.6) so the
+    // model has breathing room in hand mode — it fills the frame otherwise, and
+    // there's nowhere to "grow" it. Two-hand stretch (s>1) zooms back in.
+    _radius =
+        (_modelBaseRadius * _kHandFramingPullback / s).clamp(_minRadius, _maxRadius);
     // Pan basis from the (just-set) orbit orientation.
     _target.setZero();
     final forward = (-_orbitOffset()).normalized();
