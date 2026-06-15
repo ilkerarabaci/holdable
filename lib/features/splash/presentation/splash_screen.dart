@@ -4,18 +4,19 @@ import 'package:go_router/go_router.dart';
 
 import '../../../app/router.dart';
 import '../../../app/theme/prism_colors.dart';
-import '../../../shared/widgets/gradient_text.dart';
+import '../../../app/theme/prism_gradient.dart';
 import '../../onboarding/data/onboarding_controller.dart';
 
-/// Brand splash shown for ~1.1s on cold start (PO #1), then hands off to the
+/// Brand splash shown for ~1.3s on cold start (PO #1), then hands off to the
 /// onboarding gate (first run) or the library. Pairs with the Android 12 system
 /// splash (res/values-v31/styles.xml): the OS paints the app icon while the
 /// engine warms up, and this continues the brand moment and dissolves into the
-/// app — so there's no jarring jump from system splash to a bare screen.
+/// app.
 ///
-/// The animation plays once and navigates on completion (no repeating loop), so
-/// `tester.pumpAndSettle()` flows straight through it. Appearance is the PO's
-/// A/B choice; this is variant A — the minimal gradient wordmark.
+/// Appearance: variant B (PO pick) — the iridescent "prism light sweep". The
+/// Prism gradient slides across the wordmark while a spectrum bar draws out
+/// underneath. Plays once and navigates on completion (no repeating loop), so
+/// `tester.pumpAndSettle()` flows straight through it.
 class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
 
@@ -27,24 +28,24 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 1100),
+    duration: const Duration(milliseconds: 1300),
   )..addStatusListener((status) {
       if (status == AnimationStatus.completed) _go();
     });
 
-  // Wordmark fades + settles up first; the tagline follows.
-  late final Animation<double> _markFade = CurvedAnimation(
+  late final Animation<double> _fade = CurvedAnimation(
     parent: _controller,
-    curve: const Interval(0.0, 0.55, curve: Curves.easeOut),
+    curve: const Interval(0.0, 0.45, curve: Curves.easeOut),
   );
-  late final Animation<double> _markScale = Tween<double>(begin: 0.94, end: 1.0)
-      .animate(CurvedAnimation(
+  // Slides the iridescence horizontally across the wordmark — the "sweep".
+  late final Animation<double> _sweep = CurvedAnimation(
     parent: _controller,
-    curve: const Interval(0.0, 0.6, curve: Curves.easeOutCubic),
-  ));
-  late final Animation<double> _taglineFade = CurvedAnimation(
+    curve: const Interval(0.0, 0.85, curve: Curves.easeInOut),
+  );
+  // Spectrum bar draws out from centre once the wordmark has landed.
+  late final Animation<double> _bar = CurvedAnimation(
     parent: _controller,
-    curve: const Interval(0.45, 0.9, curve: Curves.easeOut),
+    curve: const Interval(0.45, 0.92, curve: Curves.easeOutCubic),
   );
 
   @override
@@ -78,18 +79,41 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
             mainAxisSize: MainAxisSize.min,
             children: [
               Opacity(
-                opacity: _markFade.value,
-                child: Transform.scale(
-                  scale: _markScale.value,
-                  child: GradientText('Holdable', style: t.displayMedium),
+                opacity: _fade.value,
+                child: ShaderMask(
+                  blendMode: BlendMode.srcIn,
+                  shaderCallback: (bounds) {
+                    // A gradient three times the wordmark width, slid
+                    // left→right so the prism colours sweep across as it fades
+                    // in. Symmetric stops (pink→cyan→pink) keep the edges from
+                    // popping as the band enters/leaves.
+                    final shift = (_sweep.value * 2 - 1) * bounds.width;
+                    return const LinearGradient(
+                      colors: [
+                        PrismGradient.pink,
+                        PrismGradient.violet,
+                        PrismGradient.cyan,
+                        PrismGradient.violet,
+                        PrismGradient.pink,
+                      ],
+                      stops: [0.0, 0.25, 0.5, 0.75, 1.0],
+                    ).createShader(Rect.fromLTWH(
+                        -bounds.width + shift, 0, bounds.width * 3, bounds.height));
+                  },
+                  child: Text(
+                    'Holdable',
+                    style: (t.displayMedium ?? const TextStyle())
+                        .copyWith(color: Colors.white),
+                  ),
                 ),
               ),
-              const SizedBox(height: 10),
-              Opacity(
-                opacity: _taglineFade.value,
-                child: Text(
-                  'your 3D, in your pocket',
-                  style: t.bodyMedium?.copyWith(color: c.textMuted),
+              const SizedBox(height: 14),
+              Container(
+                height: 3,
+                width: 140 * _bar.value,
+                decoration: const BoxDecoration(
+                  gradient: PrismGradient.linear,
+                  borderRadius: BorderRadius.all(Radius.circular(2)),
                 ),
               ),
             ],
