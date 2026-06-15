@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Android 12+ system-splash background (PO #1). Matches the in-app
-         SplashScreen / Prism light bg (#F4F2EE) so the OS splash dissolves into
-         the Flutter splash with no colour jump. Night override in
-         values-night/colors.xml. -->
-    <color name="splash_background">#F4F2EE</color>
+    <!-- Android 12+ system-splash background (PO #1). Fixed Prism dark bg
+         (#0E0E10) in both light and dark mode, matching the in-app SplashScreen
+         which is always dark — so the OS splash dissolves into the Flutter
+         splash with no colour jump. -->
+    <color name="splash_background">#0E0E10</color>
 </resources>
