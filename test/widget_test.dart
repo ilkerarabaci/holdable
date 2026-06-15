@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:drift/native.dart';
 import 'package:holdable/app/app.dart';
+import 'package:holdable/app/router.dart';
 import 'package:holdable/app/theme_controller.dart';
 import 'package:holdable/features/library/data/app_database.dart';
 import 'package:holdable/features/library/data/library_controller.dart';
@@ -63,6 +64,8 @@ Future<void> _pumpApp(
       overrides: [
         sharedPreferencesProvider.overrideWithValue(prefs),
         databaseProvider.overrideWith(_memDb),
+        // Skip the cold-start splash so these tests land on their screen.
+        splashEnabledProvider.overrideWithValue(false),
         if (library != null)
           libraryControllerProvider.overrideWith(() => _SeededLibrary(library)),
       ],
@@ -136,6 +139,28 @@ void main() {
         find.text('Drop an .obj, .stl, .glb, .gltf, .ply,\n'
             '.3mf, .off, .dae, .3ds or .fbx to begin.'),
         findsOneWidget);
+  });
+
+  testWidgets('splash plays then hands off to the library (PO #1)',
+      (tester) async {
+    // splashEnabledProvider keeps its true default here (unlike _pumpApp), so
+    // the app opens on the brand splash before routing onward.
+    SharedPreferences.setMockInitialValues({'onboarding_shown': true});
+    final prefs = await SharedPreferences.getInstance();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          sharedPreferencesProvider.overrideWithValue(prefs),
+          databaseProvider.overrideWith(_memDb),
+        ],
+        child: const HoldableApp(bootstrapSharing: false),
+      ),
+    );
+    await tester.pump(); // first frame: the splash wordmark
+    expect(find.text('Holdable'), findsOneWidget);
+    expect(find.text('Your shelf is empty.'), findsNothing);
+    await tester.pumpAndSettle(); // play the one-shot animation, then navigate
+    expect(find.text('Your shelf is empty.'), findsOneWidget);
   });
 
   testWidgets('library header exposes a theme toggle', (tester) async {

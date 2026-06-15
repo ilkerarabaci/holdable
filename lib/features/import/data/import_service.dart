@@ -37,6 +37,7 @@ class ImportService {
 
   Future<ImportResult> pickAndImport({
     Future<bool> Function(int sizeBytes)? confirmOversize,
+    Future<bool> Function(String name)? confirmDuplicate,
   }) async {
     final FilePickerResult? result;
     try {
@@ -63,20 +64,26 @@ class ImportService {
       final proceed = await confirmOversize(picked.size);
       if (!proceed) return const ImportResult(ImportStatus.cancelled);
     }
-    return importPath(picked.path!, displayName: picked.name, size: picked.size);
+    return importPath(picked.path!,
+        displayName: picked.name,
+        size: picked.size,
+        confirmDuplicate: confirmDuplicate);
   }
 
   /// Copies the file at [path] into app storage and registers it. Used by both
   /// the picker and the share-intent flow.
   Future<ImportResult> importPath(String path,
-      {String? displayName, int? size}) async {
+      {String? displayName,
+      int? size,
+      Future<bool> Function(String name)? confirmDuplicate}) async {
     final format = ModelFormat.fromExtension(_ext(path));
     if (format == null) {
       // Not natively parseable — but if it's a convertible format (.blend,
       // USD, …) route it through the conversion service, which returns a glb.
       final ext = _ext(path).toLowerCase();
       if (kConvertibleExtensions.contains(ext)) {
-        return _importViaConversion(path, ext, displayName: displayName);
+        return _importViaConversion(path, ext,
+            displayName: displayName, confirmDuplicate: confirmDuplicate);
       }
       if (kUnsupportedCadExtensions.contains(ext)) {
         return ImportResult(ImportStatus.unsupported,
@@ -92,9 +99,11 @@ class ImportService {
       final name =
           _baseName(displayName ?? path.split(Platform.pathSeparator).last);
       final resolvedSize = size ?? source.lengthSync();
-      // Skip re-importing a model already in the wallet (same name+size+format).
-      // Checked before copying so we don't leave an orphaned file.
-      if (_isDuplicate(name, resolvedSize, format)) {
+      // A model already in the wallet (same name+size+format) is refused unless
+      // the user confirms a re-import (PO #3). Checked before copying so a
+      // declined duplicate doesn't leave an orphaned file.
+      if (_isDuplicate(name, resolvedSize, format) &&
+          !await _confirmReimport(confirmDuplicate, name)) {
         return ImportResult(ImportStatus.duplicate,
             message: '"$name" is already in your library.');
       }
@@ -126,7 +135,8 @@ class ImportService {
   /// conversion service, then imports the returned glb as a normal model — so
   /// the viewer/AR see a plain glb and nothing downstream needs to change.
   Future<ImportResult> _importViaConversion(String path, String ext,
-      {String? displayName}) async {
+      {String? displayName,
+      Future<bool> Function(String name)? confirmDuplicate}) async {
     try {
       final source = File(path);
       final name =
@@ -144,7 +154,8 @@ class ImportService {
       final glb =
           await const ConversionService().convertToGlb(source.readAsBytesSync(), ext);
 
-      if (_isDuplicate(name, glb.length, ModelFormat.glb)) {
+      if (_isDuplicate(name, glb.length, ModelFormat.glb) &&
+          !await _confirmReimport(confirmDuplicate, name)) {
         return ImportResult(ImportStatus.duplicate,
             message: '"$name" is already in your library.');
       }
@@ -176,13 +187,15 @@ class ImportService {
 
   /// Imports a bundled CC0 sample model (from assets/sample_models/) into the
   /// wallet — used by the import sheet's "Sample models" option.
-  Future<ImportResult> importAsset(String assetPath, String displayName) async {
+  Future<ImportResult> importAsset(String assetPath, String displayName,
+      {Future<bool> Function(String name)? confirmDuplicate}) async {
     final format = ModelFormat.fromExtension(_ext(assetPath));
     if (format == null) return const ImportResult(ImportStatus.unsupported);
     try {
       final data = await rootBundle.load(assetPath);
       final bytes = data.buffer.asUint8List();
-      if (_isDuplicate(displayName, bytes.length, format)) {
+      if (_isDuplicate(displayName, bytes.length, format) &&
+          !await _confirmReimport(confirmDuplicate, displayName)) {
         return ImportResult(ImportStatus.duplicate,
             message: '"$displayName" is already in your library.');
       }
@@ -217,6 +230,16 @@ class ImportService {
     final existing = ref.read(libraryControllerProvider);
     return existing.any((m) =>
         m.name == name && m.sizeBytes == sizeBytes && m.format == format);
+  }
+
+  /// Returns true only when the user explicitly chose to re-import a model
+  /// that's already in the wallet (PO #3). With no callback — e.g. the
+  /// background share-intent path, which has no UI to ask — duplicates stay
+  /// refused, preserving the prior behaviour.
+  static Future<bool> _confirmReimport(
+      Future<bool> Function(String name)? confirm, String name) async {
+    if (confirm == null) return false;
+    return confirm(name);
   }
 
   static String _ext(String path) {

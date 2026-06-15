@@ -8,10 +8,12 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../../app/router.dart';
 import '../../../app/theme/prism_colors.dart';
+import '../../../app/theme/prism_gradient.dart';
 import '../../../app/theme_controller.dart';
 import '../../../shared/utils/format.dart';
 import '../../import/data/import_service.dart';
 import '../../import/data/sample_models.dart';
+import '../../import/domain/material_support.dart';
 import '../../import/presentation/import_sheet.dart';
 import '../data/library_controller.dart';
 import '../domain/library_model.dart';
@@ -56,12 +58,14 @@ Future<void> _pickSample(BuildContext context, WidgetRef ref) async {
     ),
   );
   if (selected == null || !context.mounted) return;
-  final result =
-      await ref.read(importServiceProvider).importAsset(selected.asset, selected.name);
+  final result = await ref.read(importServiceProvider).importAsset(
+        selected.asset,
+        selected.name,
+        confirmDuplicate: (name) => _confirmDuplicate(context, name),
+      );
   if (!context.mounted) return;
   if (result.status == ImportStatus.added) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text('Added "${result.model!.name}"')));
+    _showMaterialBalloon(context, result.model!);
   } else if (result.status == ImportStatus.duplicate) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(result.message ?? 'Already in your library')),
@@ -74,14 +78,14 @@ Future<void> _pickSample(BuildContext context, WidgetRef ref) async {
 Future<void> _runImport(BuildContext context, WidgetRef ref) async {
   final result = await ref.read(importServiceProvider).pickAndImport(
         confirmOversize: (size) => _confirmOversize(context, size),
+        confirmDuplicate: (name) => _confirmDuplicate(context, name),
       );
   if (!context.mounted) return;
   final messenger = ScaffoldMessenger.of(context);
   switch (result.status) {
     case ImportStatus.added:
-      messenger.showSnackBar(
-        SnackBar(content: Text('Added "${result.model!.name}"')),
-      );
+      // PO #7: the success toast doubles as the per-format material note.
+      _showMaterialBalloon(context, result.model!);
     case ImportStatus.cancelled:
       break;
     case ImportStatus.duplicate:
@@ -128,6 +132,88 @@ Future<bool> _confirmOversize(BuildContext context, int sizeBytes) async {
     ),
   );
   return ok ?? false;
+}
+
+/// Prism-voice confirmation when the picked file is already in the library
+/// (PO #3) — re-importing was refused outright before. Returns true to add a
+/// second copy anyway.
+Future<bool> _confirmDuplicate(BuildContext context, String name) async {
+  final c = context.prism;
+  final t = Theme.of(context).textTheme;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: c.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(color: c.borderHairline),
+      ),
+      title: Text('Already in your library', style: t.titleMedium),
+      content: Text(
+        '"$name" is already on your shelf. Import another copy?',
+        style: t.bodyMedium?.copyWith(color: c.textMuted),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          child: Text('Cancel', style: TextStyle(color: c.textMuted)),
+        ),
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          child: Text('Import again', style: TextStyle(color: c.textPrimary)),
+        ),
+      ],
+    ),
+  );
+  return ok ?? false;
+}
+
+/// PO #7 — after an import, tell the user how much of the model's appearance
+/// (materials/textures) loads for its format, tinted by support level. Doubles
+/// as the "added" confirmation. Default placement: a floating balloon right
+/// after import (the A/B alternative is an always-on legend in the import sheet).
+void _showMaterialBalloon(BuildContext context, LibraryModel model) {
+  final c = context.prism;
+  final t = Theme.of(context).textTheme;
+  final support = materialSupportFor(model.format);
+  final (IconData icon, Color tint) = switch (support) {
+    MaterialSupport.full => (Icons.check_circle_outline, PrismGradient.cyan),
+    MaterialSupport.conditional => (Icons.info_outline, PrismGradient.violet),
+    MaterialSupport.partial => (Icons.info_outline, PrismGradient.violet),
+    MaterialSupport.none => (Icons.layers_outlined, c.textMuted),
+  };
+  ScaffoldMessenger.of(context)
+    ..clearSnackBars()
+    ..showSnackBar(
+      SnackBar(
+        backgroundColor: c.surface,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 4),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: BorderSide(color: c.borderHairline),
+        ),
+        content: Row(
+          children: [
+            Icon(icon, color: tint, size: 22),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Added "${model.name}"',
+                      style: t.bodyMedium?.copyWith(color: c.textPrimary)),
+                  const SizedBox(height: 2),
+                  Text('${model.format.label} · ${support.title}',
+                      style: t.labelSmall?.copyWith(color: c.textMuted)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
 }
 
 /// Library: empty state when the wallet is empty, otherwise a grid of

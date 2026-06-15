@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark-mode system-splash background — Prism dark bg (#0E0E10), matching
+         the in-app SplashScreen in dark mode. See values/colors.xml. -->
+    <color name="splash_background">#0E0E10</color>
+</resources>
