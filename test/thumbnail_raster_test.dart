@@ -4,16 +4,15 @@ import 'dart:math' as math;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:holdable/features/viewer/data/thumbnail_raster.dart';
 
-/// Returns true if pixel (x,y) in an RGBA8888 [size]×[size] buffer equals
-/// the given opaque-ish RGB (alpha ignored).
-bool _isRgb(Uint8List buf, int size, int x, int y, int r, int g, int b) {
+/// RGB of pixel (x,y) in an RGBA8888 [size]×[size] buffer (alpha ignored).
+({int r, int g, int b}) _rgb(Uint8List buf, int size, int x, int y) {
   final i = (y * size + x) * 4;
-  return buf[i] == r && buf[i + 1] == g && buf[i + 2] == b;
+  return (r: buf[i], g: buf[i + 1], b: buf[i + 2]);
 }
 
 void main() {
   const size = 64;
-  const bg = 0xFF101014; // opaque dark
+  const bg = 0xFF101014; // opaque dark (R=16, G=16, B=20)
   const surface = 0x00D1D1DB; // light neutral (alpha ignored by rasterizer)
   const az = math.pi / 4, el = 0.6;
 
@@ -51,46 +50,50 @@ void main() {
         surfaceColor: surface,
       )!;
 
-  test('produces a full-size RGBA buffer', () {
+  test('produces a full-size RGBA buffer (downsampled back to size)', () {
     final buf = rasterCube();
     expect(buf.length, size * size * 4);
   });
 
-  test('background corners stay the background color', () {
+  test('background has a vertical gradient (top row lighter than bottom row)',
+      () {
     final buf = rasterCube();
-    // The 10% margin guarantees the extreme corners are never covered.
-    expect(_isRgb(buf, size, 0, 0, 0x10, 0x10, 0x14), isTrue);
-    expect(_isRgb(buf, size, size - 1, size - 1, 0x10, 0x10, 0x14), isTrue);
-    // All background pixels are fully opaque.
+    // The 10% margin guarantees the extreme corners are background, not model.
+    final top = _rgb(buf, size, 0, 0); // top-left corner
+    final bottom = _rgb(buf, size, 0, size - 1); // bottom-left corner
+    // Top is rendered ~8% lighter, bottom ~8% darker than the base bg.
+    expect(top.r, greaterThan(bottom.r), reason: 'gradient R top>bottom');
+    expect(top.g, greaterThan(bottom.g), reason: 'gradient G top>bottom');
+    expect(top.b, greaterThan(bottom.b), reason: 'gradient B top>bottom');
+    // Background stays fully opaque.
     expect(buf[3], 0xFF);
+    // And brackets the base bg color (top brighter, bottom darker than 0x10/0x14).
+    expect(top.r, greaterThanOrEqualTo(0x10));
+    expect(bottom.r, lessThanOrEqualTo(0x10));
   });
 
-  test('the model is actually drawn (center differs from background)', () {
+  test('the model is actually drawn (center is a lit surface, not background)',
+      () {
     final buf = rasterCube();
-    var drawn = 0;
-    for (var i = 0; i < buf.length; i += 4) {
-      if (!(buf[i] == 0x10 && buf[i + 1] == 0x10 && buf[i + 2] == 0x14)) {
-        drawn++;
-      }
-    }
-    // A centered cube at this iso angle covers a large fraction of the frame.
-    expect(drawn, greaterThan(size * size ~/ 4));
-    // The center pixel is on the model.
-    expect(
-      _isRgb(buf, size, size ~/ 2, size ~/ 2, 0x10, 0x10, 0x14),
-      isFalse,
-    );
+    // The center pixel is on the model; the surface (light neutral, shaded)
+    // is much brighter than the dark background gradient (max ~17).
+    final center = _rgb(buf, size, size ~/ 2, size ~/ 2);
+    expect(center.r, greaterThan(60), reason: 'lit surface, not dark bg');
+    expect(center.g, greaterThan(60));
+    expect(center.b, greaterThan(60));
   });
 
   test('shading varies across faces (not a flat silhouette)', () {
     final buf = rasterCube();
+    // Sample bright (lit-surface) pixels only — anything well above the dark
+    // background gradient — and collect their tones.
     final tones = <int>{};
     for (var i = 0; i < buf.length; i += 4) {
       final r = buf[i], g = buf[i + 1], b = buf[i + 2];
-      if (r == 0x10 && g == 0x10 && b == 0x14) continue; // skip background
+      if (r < 40 && g < 40 && b < 40) continue; // skip background gradient
       tones.add((r << 16) | (g << 8) | b);
     }
-    // Different cube faces have different normals → different Lambert tones.
+    // Different cube faces have different normals → different shaded tones.
     expect(tones.length, greaterThan(1));
   });
 
