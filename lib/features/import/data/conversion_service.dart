@@ -54,6 +54,28 @@ ConversionException _httpError(int code) {
   return ConversionException('Conversion failed (HTTP $code).');
 }
 
+/// State of an async (over-the-sync-cap) conversion job, polled from
+/// GET /jobs/<id>. Big files are converted in a Cloud Run Job, not in-request.
+class JobStatus {
+  const JobStatus(
+      {required this.state, this.phase, this.downloadUrl, this.error});
+  final String state; // queued | running | done | failed
+  final String? phase;
+  final String? downloadUrl;
+  final String? error;
+
+  bool get isDone => state == 'done';
+  bool get isFailed => state == 'failed';
+  bool get isTerminal => isDone || isFailed;
+
+  factory JobStatus.fromJson(Map<String, dynamic> j) => JobStatus(
+        state: (j['state'] as String?) ?? 'failed',
+        phase: j['phase'] as String?,
+        downloadUrl: j['downloadUrl'] as String?,
+        error: j['error'] as String?,
+      );
+}
+
 /// Uploads an unsupported model to the conversion service and gets back glb
 /// bytes. Pure transport — the caller persists/imports the result.
 class ConversionService {
@@ -65,6 +87,104 @@ class ConversionService {
       return _convertDirect(bytes, e);
     }
     return _convertViaGcs(bytes, e);
+  }
+
+  // --- Async path (>200 MB): convert in a Cloud Run Job, poll for the result. ---
+
+  /// Enqueues a large file for ASYNC conversion: signs a job upload URL, streams
+  /// the file straight to GCS (never buffering it in RAM — it can be hundreds of
+  /// MB), then starts the Cloud Run Job. Returns the job id to poll with
+  /// [awaitJob]. Use when the file is too big for the synchronous path.
+  Future<String> enqueueLargeConversion(File file, String ext) async {
+    final e = ext.toLowerCase().replaceAll('.', '');
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    try {
+      final urlReq = await client
+          .postUrl(Uri.parse('$kConversionBaseUrl/jobs/upload-url?ext=$e'));
+      final urlResp = await urlReq.close().timeout(const Duration(seconds: 30));
+      final urlBody = await _collectString(urlResp);
+      if (urlResp.statusCode != 200) throw _httpError(urlResp.statusCode);
+      final signed = jsonDecode(urlBody) as Map<String, dynamic>;
+      final jobId = signed['jobId'] as String?;
+      final uploadUrl = signed['uploadUrl'] as String?;
+      if (jobId == null || uploadUrl == null) {
+        throw ConversionException('Conversion service error.');
+      }
+      // Stream the file to GCS from disk (content-type must match the signature).
+      final len = await file.length();
+      final putReq = await client.putUrl(Uri.parse(uploadUrl));
+      putReq.headers
+          .set(HttpHeaders.contentTypeHeader, 'application/octet-stream');
+      putReq.contentLength = len;
+      await putReq.addStream(file.openRead());
+      final putResp = await putReq.close().timeout(const Duration(minutes: 15));
+      await _drain(putResp);
+      if (putResp.statusCode != 200) {
+        throw ConversionException('Upload failed (HTTP ${putResp.statusCode}).');
+      }
+      final jobReq =
+          await client.postUrl(Uri.parse('$kConversionBaseUrl/jobs'));
+      jobReq.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      jobReq.add(utf8
+          .encode(jsonEncode({'jobId': jobId, 'ext': e, 'origBytes': len})));
+      final jobResp = await jobReq.close().timeout(const Duration(seconds: 30));
+      await _drain(jobResp);
+      if (jobResp.statusCode != 202 && jobResp.statusCode != 200) {
+        throw _httpError(jobResp.statusCode);
+      }
+      return jobId;
+    } on SocketException {
+      throw ConversionException('Conversion service unreachable.');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Polls a job once.
+  Future<JobStatus> pollJob(String jobId) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    try {
+      final req =
+          await client.getUrl(Uri.parse('$kConversionBaseUrl/jobs/$jobId'));
+      final resp = await req.close().timeout(const Duration(seconds: 30));
+      final body = await _collectString(resp);
+      if (resp.statusCode != 200) throw _httpError(resp.statusCode);
+      return JobStatus.fromJson(jsonDecode(body) as Map<String, dynamic>);
+    } on SocketException {
+      throw ConversionException('Conversion service unreachable.');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Polls until the job is done/failed or [maxWait] elapses (backing off
+  /// 3s → 12s). Throws if it's still running past the deadline.
+  Future<JobStatus> awaitJob(String jobId,
+      {Duration maxWait = const Duration(minutes: 30)}) async {
+    final deadline = DateTime.now().add(maxWait);
+    var delay = const Duration(seconds: 3);
+    while (true) {
+      final s = await pollJob(jobId);
+      if (s.isTerminal) return s;
+      if (DateTime.now().isAfter(deadline)) {
+        throw ConversionException(
+            "Still converting — this one's taking a while. Check back shortly.");
+      }
+      await Future<void>.delayed(delay);
+      if (delay < const Duration(seconds: 12)) {
+        delay += const Duration(seconds: 2);
+      }
+    }
+  }
+
+  /// Downloads the finished glb from a completed job's signed [downloadUrl].
+  Future<Uint8List> downloadJobGlb(String downloadUrl) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    try {
+      return await _downloadGlb(client, downloadUrl);
+    } finally {
+      client.close(force: true);
+    }
   }
 
   /// Small files: POST the raw bytes to /convert and stream back the glb.
