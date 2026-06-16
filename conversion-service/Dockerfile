@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends freecad \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY server.py convert.py convert_step.py ./
+COPY server.py convert_core.py job_worker.py convert.py convert_step.py ./
 
 ENV PORT=8080
 EXPOSE 8080

@@ -38,6 +38,7 @@ class ImportService {
   Future<ImportResult> pickAndImport({
     Future<bool> Function(int sizeBytes)? confirmOversize,
     Future<bool> Function(String name)? confirmDuplicate,
+    void Function()? onConverting,
   }) async {
     final FilePickerResult? result;
     try {
@@ -67,7 +68,8 @@ class ImportService {
     return importPath(picked.path!,
         displayName: picked.name,
         size: picked.size,
-        confirmDuplicate: confirmDuplicate);
+        confirmDuplicate: confirmDuplicate,
+        onConverting: onConverting);
   }
 
   /// Copies the file at [path] into app storage and registers it. Used by both
@@ -75,7 +77,8 @@ class ImportService {
   Future<ImportResult> importPath(String path,
       {String? displayName,
       int? size,
-      Future<bool> Function(String name)? confirmDuplicate}) async {
+      Future<bool> Function(String name)? confirmDuplicate,
+      void Function()? onConverting}) async {
     final format = ModelFormat.fromExtension(_ext(path));
     if (format == null) {
       // Not natively parseable — but if it's a convertible format (.blend,
@@ -83,7 +86,9 @@ class ImportService {
       final ext = _ext(path).toLowerCase();
       if (kConvertibleExtensions.contains(ext)) {
         return _importViaConversion(path, ext,
-            displayName: displayName, confirmDuplicate: confirmDuplicate);
+            displayName: displayName,
+            confirmDuplicate: confirmDuplicate,
+            onConverting: onConverting);
       }
       if (kUnsupportedCadExtensions.contains(ext)) {
         return ImportResult(ImportStatus.unsupported,
@@ -136,23 +141,36 @@ class ImportService {
   /// the viewer/AR see a plain glb and nothing downstream needs to change.
   Future<ImportResult> _importViaConversion(String path, String ext,
       {String? displayName,
-      Future<bool> Function(String name)? confirmDuplicate}) async {
+      Future<bool> Function(String name)? confirmDuplicate,
+      void Function()? onConverting}) async {
     try {
       final source = File(path);
       final name =
           _baseName(displayName ?? path.split(Platform.pathSeparator).last);
-      // Guard the upload before it leaves the device: cloud conversion is
-      // capped (free tier) and the server hard-caps at 200 MB anyway, so fail
-      // fast with a clear message rather than burning data on a doomed upload.
       final bytes = source.lengthSync();
-      if (bytes > kMaxConvertUploadBytes) {
+      // Above the async ceiling we still refuse (don't burn upload data on an
+      // absurd file). Otherwise: ≤ the sync cap converts in-request; anything
+      // larger converts in a Cloud Run Job — no more hard 200 MB wall.
+      if (bytes > kMaxAsyncUploadBytes) {
         final mb = (bytes / (1024 * 1024)).round();
-        final cap = kMaxConvertUploadBytes ~/ (1024 * 1024);
+        final cap = kMaxAsyncUploadBytes ~/ (1024 * 1024);
         return ImportResult(ImportStatus.error,
-            message: 'This file is ${mb}MB. Conversion is limited to ${cap}MB.');
+            message: 'This file is ${mb}MB. The limit is ${cap}MB.');
       }
-      final glb =
-          await const ConversionService().convertToGlb(source.readAsBytesSync(), ext);
+      const svc = ConversionService();
+      final glb = bytes > kSyncConvertMax
+          ? await (() async {
+              // Big file → async Job. Stream the upload, poll, then download the
+              // mobile-fit glb the Job produced.
+              onConverting?.call();
+              final jobId = await svc.enqueueLargeConversion(source, ext);
+              final status = await svc.awaitJob(jobId);
+              if (!status.isDone || status.downloadUrl == null) {
+                throw ConversionException(status.error ?? 'Conversion failed.');
+              }
+              return svc.downloadJobGlb(status.downloadUrl!);
+            })()
+          : await svc.convertToGlb(source.readAsBytesSync(), ext);
 
       if (_isDuplicate(name, glb.length, ModelFormat.glb) &&
           !await _confirmReimport(confirmDuplicate, name)) {
@@ -261,11 +279,15 @@ class ImportService {
 /// against accidentally importing something that loads slowly / runs hot.
 const kMaxImportBytes = 60 * 1024 * 1024;
 
-/// Hard cap on what we'll upload for cloud conversion. Large files now go via
-/// the GCS-upload path (which bypasses Cloud Run's 32 MiB request limit), so
-/// this is the product cap, not a transport one. 200 MB = the paid-tier ceiling.
+/// Files up to this size convert SYNCHRONOUSLY (≤28 MB POST direct, 28-200 MB
+/// via the GCS-upload path). Anything larger converts in an ASYNC Cloud Run Job
+/// instead of being refused. 200 MB = the paid-tier sync ceiling.
 /// TODO(tier): drop to ~50 MB for free once entitlements ship.
-const kMaxConvertUploadBytes = 200 * 1024 * 1024;
+const kSyncConvertMax = 200 * 1024 * 1024;
+
+/// Upper bound for the async (>200 MB) path — an abuse ceiling, not a product
+/// wall. Above this we refuse before burning the user's upload data.
+const kMaxAsyncUploadBytes = 2 * 1024 * 1024 * 1024;
 
 /// Proprietary / closed CAD formats we deliberately do NOT convert: there's no
 /// open reader (FreeCAD/OpenCASCADE can't parse them — they'd need a licensed

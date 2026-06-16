@@ -1,19 +1,32 @@
 """Holdable conversion service.
 
-POST /convert      (raw body + ?ext=, or multipart `file`)  -> model as .glb
-POST /upload-url   (?ext=)   -> { uploadUrl, objectName } signed GCS PUT URL
-POST /convert-gcs  (JSON {objectName, ext}) -> glb inline, OR { downloadUrl }
-GET  /health                 -> liveness check
+Sync (small / 28-200 MB):
+  POST /convert      (raw body + ?ext=, or multipart `file`)  -> model as .glb
+  POST /upload-url   (?ext=)   -> { uploadUrl, objectName } signed GCS PUT URL
+  POST /convert-gcs  (JSON {objectName, ext}) -> glb inline, OR { downloadUrl }
 
-Two upload paths. Small files (<= ~32 MiB) POST straight to /convert. Cloud Run
-rejects HTTP/1 request bodies over 32 MiB at the ingress, so LARGE files use the
-GCS path: the client asks /upload-url for a signed URL, PUTs the file directly to
-GCS (no size limit), then calls /convert-gcs with the object name; the service
-downloads it from GCS, converts, and returns the glb inline (small) or a signed
-download URL (large output). Objects auto-expire (bucket lifecycle, 1 day).
+Async (>200 MB — converts in a Cloud Run JOB so it isn't request-bound):
+  POST /jobs/upload-url (?ext=) -> { jobId, uploadUrl, objectName } signed PUT
+  POST /jobs            (JSON {jobId, ext, origBytes}) -> 202 {jobId, state}
+  GET  /jobs/<jobId>            -> status.json (+ downloadUrl when state=done)
+
+  GET  /health                 -> liveness check
+
+Small files POST straight to /convert. Cloud Run rejects HTTP/1 request bodies
+over 32 MiB at the ingress, so larger files use the GCS path (sign a PUT, upload
+direct, then /convert-gcs). Files over the sync cap go through /jobs: the client
+PUTs to GCS, /jobs writes job state to GCS and triggers a Cloud Run Job that
+decimates to a mobile budget and writes the output glb back; the client polls
+GET /jobs/<id>. GCS is the only state store (no Firestore / Tasks / Pub-Sub).
+Objects auto-expire (bucket lifecycle).
+
+The conversion core (Blender/FreeCAD runners, GCS helpers) lives in
+convert_core.py so the sync path here and the async job_worker.py run identical
+logic. Output is always a PLAIN glb (no Draco/KTX2) — see convert_core's note.
 """
 
 import datetime
+import json
 import os
 import shutil
 import subprocess
@@ -22,113 +35,28 @@ import uuid
 
 from flask import Flask, request, send_file, jsonify
 
+from convert_core import (
+    ConvertError, SUPPORTED_EXTS, INLINE_MAX, BUCKET_NAME,
+    convert_to_glb as _convert_to_glb,
+    norm_ext as _norm_ext,
+    bucket as _bucket,
+    signed_url as _signed_url,
+)
+
 app = Flask(__name__)
 # /convert reads the raw body into memory; cap it (Cloud Run ingress caps at
-# 32 MiB anyway). The GCS path has no such limit.
+# 32 MiB anyway). The GCS + jobs paths have no such limit.
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
 app.config["MAX_FORM_MEMORY_SIZE"] = 64 * 1024 * 1024
 
-# Extensions this service can convert. Native-parseable formats (obj/stl/glb/…)
-# never reach here — the app only calls these endpoints for what it can't read.
-BLENDER_EXTS = {".blend", ".usd", ".usda", ".usdc", ".usdz"}
-# CAD B-rep formats: FreeCAD (OpenCASCADE) tessellates them to an STL, then
-# Blender turns that into the glb.
-FREECAD_EXTS = {".step", ".stp", ".iges", ".igs"}
-SUPPORTED_EXTS = BLENDER_EXTS | FREECAD_EXTS
-
-# A single conversion shouldn't run forever (a runaway import / heavy tessellate).
-# Env-configurable so it can be tuned on redeploy without a rebuild. Keep it
-# below the gunicorn worker timeout (Dockerfile -t) and the Cloud Run --timeout.
-CONVERT_TIMEOUT_S = int(os.environ.get("CONVERT_TIMEOUT_S", "240"))
-
-# GCS bucket for the large-file path (set via the CONVERT_BUCKET env on deploy).
-BUCKET_NAME = os.environ.get("CONVERT_BUCKET", "")
-# Return the glb in the response if it's small enough to clear Cloud Run's 32 MiB
-# response limit with margin; otherwise hand back a signed download URL.
-INLINE_MAX = 28 * 1024 * 1024
-SIGN_TTL = datetime.timedelta(minutes=20)
+# Async Job (>200 MB) target — overridable via env on deploy.
+JOB_PROJECT = os.environ.get("JOB_PROJECT", "kerte-dev-prod")
+JOB_REGION = os.environ.get("JOB_REGION", "europe-west3")
+JOB_NAME = os.environ.get("JOB_NAME", "holdable-convert-job")
 
 
-class ConvertError(Exception):
-    def __init__(self, message, status=422, log=None):
-        super().__init__(message)
-        self.message = message
-        self.status = status
-        self.log = log
-
-
-def _run_blender(src, out):
-    return subprocess.run(
-        ["blender", "--background", "--factory-startup",
-         "--python", "convert.py", "--", src, out],
-        capture_output=True, text=True, timeout=CONVERT_TIMEOUT_S,
-    )
-
-
-def _run_freecad(src, stl):
-    env = {**os.environ, "CONVERT_IN": src, "CONVERT_OUT": stl}
-    return subprocess.run(
-        ["freecadcmd", "convert_step.py"],
-        env=env, capture_output=True, text=True, timeout=CONVERT_TIMEOUT_S,
-    )
-
-
-def _convert_to_glb(work, src, ext):
-    """Runs the right tool for [ext]; returns the output .glb path or raises
-    ConvertError. Shared by /convert and /convert-gcs."""
-    out = os.path.join(work, "output.glb")
-    if ext in FREECAD_EXTS:
-        stl = os.path.join(work, "inter.stl")
-        fc = _run_freecad(src, stl)
-        if not os.path.exists(stl) or os.path.getsize(stl) == 0:
-            tail = (fc.stdout[-1500:] + "\n" + fc.stderr[-1500:]).strip()
-            raise ConvertError("CAD tessellation failed", 422, tail)
-        proc = _run_blender(stl, out)
-    else:
-        proc = _run_blender(src, out)
-    # Surface Blender's tail (timing lines from convert.py, warnings) to the
-    # Cloud Run logs even on success — handy for diagnosing slow conversions.
-    print("[blender]\n" + (proc.stderr or proc.stdout or "")[-2000:], flush=True)
-    if not os.path.exists(out) or os.path.getsize(out) == 0:
-        tail = (proc.stdout[-1500:] + "\n" + proc.stderr[-1500:]).strip()
-        raise ConvertError("conversion produced no output", 422, tail)
-    return out
-
-
-def _norm_ext(ext):
-    ext = (ext or "").lower()
-    if ext and not ext.startswith("."):
-        ext = "." + ext
-    return ext
-
-
-# --- GCS helpers (lazy imports so /health + /convert work without the lib) ---
-
-def _bucket():
-    from google.cloud import storage
-    return storage.Client().bucket(BUCKET_NAME)
-
-
-def _signing_creds():
-    """Default Cloud Run SA credentials, refreshed — used to V4-sign URLs via
-    IAM signBlob (the SA has roles/iam.serviceAccountTokenCreator on itself)."""
-    from google import auth
-    from google.auth.transport import requests as gauth_requests
-    creds, _ = auth.default()
-    creds.refresh(gauth_requests.Request())
-    return creds
-
-
-def _signed_url(blob, method, content_type=None):
-    creds = _signing_creds()
-    return blob.generate_signed_url(
-        version="v4",
-        expiration=SIGN_TTL,
-        method=method,
-        content_type=content_type,
-        service_account_email=creds.service_account_email,
-        access_token=creds.token,
-    )
+def _iso_now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 @app.get("/health")
@@ -164,8 +92,6 @@ def convert():
     except ConvertError as e:
         return jsonify(error=e.message, log=e.log), e.status
     except subprocess.TimeoutExpired as e:
-        # Log whatever Blender printed before the kill — the convert.py phase
-        # timing tells us whether LOAD or EXPORT blew the budget.
         partial = (e.stderr or e.stdout or b"")
         if isinstance(partial, bytes):
             partial = partial.decode("utf-8", "replace")
@@ -214,7 +140,6 @@ def convert_gcs():
         bucket.blob(name).download_to_filename(src)
         out = _convert_to_glb(work, src, ext)
         size = os.path.getsize(out)
-        # The upload is consumed; drop it now (lifecycle is the backstop).
         try:
             bucket.blob(name).delete()
         except Exception:  # noqa: BLE001
@@ -222,7 +147,6 @@ def convert_gcs():
         if size <= INLINE_MAX:
             return send_file(out, mimetype="model/gltf-binary",
                              as_attachment=True, download_name="model.glb")
-        # Output too big for the 32 MiB response cap → hand back a signed GET URL.
         out_name = f"outputs/{uuid.uuid4().hex}.glb"
         ob = bucket.blob(out_name)
         ob.upload_from_filename(out, content_type="model/gltf-binary")
@@ -230,8 +154,6 @@ def convert_gcs():
     except ConvertError as e:
         return jsonify(error=e.message, log=e.log), e.status
     except subprocess.TimeoutExpired as e:
-        # Log whatever Blender printed before the kill — the convert.py phase
-        # timing tells us whether LOAD or EXPORT blew the budget.
         partial = (e.stderr or e.stdout or b"")
         if isinstance(partial, bytes):
             partial = partial.decode("utf-8", "replace")
@@ -241,6 +163,116 @@ def convert_gcs():
         return jsonify(error=f"gcs convert failed: {e}"), 500
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+# --- Async >200 MB path (Cloud Run Job + GCS-as-state) ---
+
+def _job_blob(job_id, name):
+    return _bucket().blob(f"jobs/{job_id}/{name}")
+
+
+def _valid_job_id(job_id):
+    # uuid4().hex is 32 hex chars; reject anything with path/space chars so the
+    # id can't escape the jobs/<id>/ prefix.
+    return bool(job_id) and job_id.isalnum() and len(job_id) <= 64
+
+
+def _trigger_job(job_id):
+    """Fire the Cloud Run Job for [job_id] via the Admin API (so no gcloud in
+    the image). Passes JOB_ID + JOB_BUCKET as per-execution env overrides. The
+    service SA needs run.jobs.run + iam.serviceAccountUser on the Job's SA."""
+    from google import auth
+    from google.auth.transport.requests import AuthorizedSession
+    creds, _ = auth.default()
+    session = AuthorizedSession(creds)
+    url = (f"https://run.googleapis.com/v2/projects/{JOB_PROJECT}"
+           f"/locations/{JOB_REGION}/jobs/{JOB_NAME}:run")
+    body = {"overrides": {"containerOverrides": [{"env": [
+        {"name": "JOB_ID", "value": job_id},
+        {"name": "JOB_BUCKET", "value": BUCKET_NAME},
+    ]}]}}
+    resp = session.post(url, json=body, timeout=30)
+    if resp.status_code >= 300:
+        raise ConvertError(
+            f"could not start job: {resp.status_code} {resp.text[:300]}", 500)
+    return resp.json().get("name")
+
+
+@app.post("/jobs/upload-url")
+def jobs_upload_url():
+    """Signed PUT URL for a big file under a fresh job id. Client PUTs the file,
+    then calls POST /jobs to start the async conversion."""
+    if not BUCKET_NAME:
+        return jsonify(error="gcs not configured"), 500
+    ext = _norm_ext(request.args.get("ext"))
+    if ext not in SUPPORTED_EXTS:
+        return jsonify(error=f"unsupported extension: {ext or '(none)'}"), 415
+    job_id = uuid.uuid4().hex
+    name = f"jobs/{job_id}/input{ext}"
+    try:
+        url = _signed_url(_bucket().blob(name), "PUT",
+                          content_type="application/octet-stream")
+    except Exception as e:  # noqa: BLE001
+        return jsonify(error=f"could not sign upload url: {e}"), 500
+    return jsonify(jobId=job_id, uploadUrl=url, objectName=name)
+
+
+@app.post("/jobs")
+def jobs_create():
+    """Start an async conversion for an already-uploaded big file: write
+    meta.json + an initial status.json, trigger the Cloud Run Job, return 202."""
+    if not BUCKET_NAME:
+        return jsonify(error="gcs not configured"), 500
+    body = request.get_json(silent=True) or {}
+    job_id = (body.get("jobId") or "").strip()
+    ext = _norm_ext(body.get("ext"))
+    if not _valid_job_id(job_id):
+        return jsonify(error="bad jobId"), 400
+    if ext not in SUPPORTED_EXTS:
+        return jsonify(error=f"unsupported extension: {ext or '(none)'}"), 415
+    if not _job_blob(job_id, f"input{ext}").exists():
+        return jsonify(error="input not uploaded"), 400
+
+    meta = {"id": job_id, "ext": ext, "origBytes": body.get("origBytes"),
+            "createdAt": _iso_now()}
+    _job_blob(job_id, "meta.json").upload_from_string(
+        json.dumps(meta), content_type="application/json")
+    status = {"id": job_id, "state": "queued", "phase": "queued", "ext": ext,
+              "error": None, "outputObject": None, "outputBytes": None}
+    _job_blob(job_id, "status.json").upload_from_string(
+        json.dumps(status), content_type="application/json")
+    try:
+        _trigger_job(job_id)
+    except ConvertError as e:
+        status.update(state="failed", error=e.message)
+        _job_blob(job_id, "status.json").upload_from_string(
+            json.dumps(status), content_type="application/json")
+        return jsonify(error=e.message), e.status
+    except Exception as e:  # noqa: BLE001
+        return jsonify(error=f"could not start job: {e}"), 500
+    return jsonify(jobId=job_id, state="queued"), 202
+
+
+@app.get("/jobs/<job_id>")
+def jobs_status(job_id):
+    """Poll a job. Returns status.json; when done, adds a signed downloadUrl for
+    the output glb."""
+    if not BUCKET_NAME:
+        return jsonify(error="gcs not configured"), 500
+    if not _valid_job_id(job_id):
+        return jsonify(error="bad jobId"), 400
+    blob = _job_blob(job_id, "status.json")
+    if not blob.exists():
+        return jsonify(error="unknown job"), 404
+    status = json.loads(blob.download_as_text())
+    if status.get("state") == "done" and status.get("outputObject"):
+        try:
+            status["downloadUrl"] = _signed_url(
+                _bucket().blob(status["outputObject"]), "GET")
+        except Exception as e:  # noqa: BLE001
+            status["downloadUrl"] = None
+            status["error"] = f"could not sign download url: {e}"
+    return jsonify(status)
 
 
 if __name__ == "__main__":
