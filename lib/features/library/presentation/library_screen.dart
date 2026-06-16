@@ -79,9 +79,11 @@ Future<void> _runImport(BuildContext context, WidgetRef ref) async {
   final result = await ref.read(importServiceProvider).pickAndImport(
         confirmOversize: (size) => _confirmOversize(context, size),
         confirmDuplicate: (name) => _confirmDuplicate(context, name),
+        onConverting: () => _showConvertingBanner(context),
       );
   if (!context.mounted) return;
-  final messenger = ScaffoldMessenger.of(context);
+  // Clear any "converting…" banner before showing the final result.
+  final messenger = ScaffoldMessenger.of(context)..clearSnackBars();
   switch (result.status) {
     case ImportStatus.added:
       // PO #7: the success toast doubles as the per-format material note.
@@ -166,6 +168,46 @@ Future<bool> _confirmDuplicate(BuildContext context, String name) async {
     ),
   );
   return ok ?? false;
+}
+
+/// Persistent banner while a large file converts in the cloud (async Job path,
+/// >200 MB). Cleared when the import resolves (see _runImport).
+void _showConvertingBanner(BuildContext context) {
+  final c = context.prism;
+  final t = Theme.of(context).textTheme;
+  ScaffoldMessenger.of(context)
+    ..clearSnackBars()
+    ..showSnackBar(
+      SnackBar(
+        backgroundColor: c.surface,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(minutes: 10),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: BorderSide(color: c.borderHairline),
+        ),
+        content: Row(
+          children: [
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor:
+                    const AlwaysStoppedAnimation<Color>(PrismGradient.violet),
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(
+                'Converting your file in the cloud — you can keep using Holdable.',
+                style: t.bodyMedium?.copyWith(color: c.textPrimary),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
 }
 
 /// PO #7 — after an import, tell the user how much of the model's appearance
