@@ -275,8 +275,8 @@ double? rayTriangleIntersection(
 /// isolate-sendable (typed lists + doubles): the mesh is transformed by the
 /// same fit (scale about origin after centering) that `_applyMode` applies, so
 /// the ray (already in world space) hits where the model is actually drawn.
-class _PivotPickRequest {
-  const _PivotPickRequest({
+class PivotPickRequest {
+  const PivotPickRequest({
     required this.positions,
     required this.indices,
     required this.triangleCount,
@@ -303,7 +303,7 @@ class _PivotPickRequest {
 /// Returns the nearest world-space hit point of the request's ray against the
 /// transformed mesh, or null if the ray misses every triangle. Top-level so it
 /// can run via `compute()` for large meshes; also called inline for small ones.
-Vector3? nearestPivotHit(_PivotPickRequest r) {
+Vector3? nearestPivotHit(PivotPickRequest r) {
   final origin = Vector3(r.ox, r.oy, r.oz);
   final dir = Vector3(r.dx, r.dy, r.dz);
   final tris = math.min(r.triangleCount, r.indices.length ~/ 3);
