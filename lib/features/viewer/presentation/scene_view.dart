@@ -461,6 +461,14 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   /// from behind the bottom panel (or recentered). Origin = model center.
   final Vector3 _target = Vector3.zero();
 
+  /// Last logical size of the render surface (from the build LayoutBuilder),
+  /// used to map a double-tap point to NDC for the pivot ray-cast (#8).
+  Size? _lastSize;
+
+  /// Monotonic token so a stale off-isolate pivot result (the user double-tapped
+  /// again, or the model changed, before [compute] returned) is ignored.
+  int _pivotPickSeq = 0;
+
   bool _applyingCamera = false;
   bool _cameraDirty = false;
 
@@ -912,6 +920,101 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     }
     _target.setZero(); // recenter when snapping to a preset
     await _applyCameraNow();
+  }
+
+  // --- Pivot ray-cast (#8): double-tap to set the orbit pivot ---------------
+
+  /// Default vertical field-of-view (radians) used to build the pick ray. The
+  /// live lens preset (#9) varies the actual projection, but ~36° is a sane
+  /// middle value for the 70mm default; pivot precision is device-tunable, so
+  /// if double-tap picking lands slightly off on a given panel, nudge this (and
+  /// the NDC mapping) rather than chasing the exact Filament projection matrix.
+  static const double _kPickVfov = 36.0 * math.pi / 180.0;
+
+  /// Triangle-count threshold above which the nearest-triangle search runs in a
+  /// background isolate via [compute] (keeps the UI thread responsive on big
+  /// meshes); smaller meshes are intersected inline.
+  static const int _kPickInlineMaxTris = 20000;
+
+  /// Double-tap handler (#8): casts a ray from the LIVE orbit camera through the
+  /// tapped point and sets the orbit pivot ([_target]) to the nearest point on
+  /// the model. A miss (tap on empty background) is a no-op.
+  ///
+  /// [localLogical] is the tap position in the widget's local logical
+  /// coordinates (from onDoubleTapDown). The ray is built in WORLD space, where
+  /// the model is drawn after _applyMode's fit transform (center then uniform
+  /// scale), so the same transform is baked into the [PivotPickRequest].
+  Future<void> _pickPivot(Offset localLogical) async {
+    final p = _model;
+    final size = _lastSize;
+    if (p == null || size == null) return;
+    if (size.width <= 0 || size.height <= 0) return;
+    if (p.triangleCount <= 0 || p.indices.length < 3) return;
+
+    // Camera basis from the live orbit camera (matches _applyCameraNow's
+    // lookAt(eye=_orbitPosition(), focus=_target, up=+Y)).
+    final eye = _orbitPosition();
+    final forward = (_target - eye);
+    if (forward.length2 < 1e-12) return;
+    forward.normalize();
+    final right = forward.cross(Vector3(0, 1, 0));
+    if (right.length2 < 1e-12) return; // looking straight up/down — bail
+    right.normalize();
+    final camUp = right.cross(forward)..normalize();
+
+    // Tapped point → normalized device coords in [-1, 1]. y is flipped because
+    // screen y grows downward while NDC y grows up.
+    final ndcX = (localLogical.dx / size.width) * 2.0 - 1.0;
+    final ndcY = 1.0 - (localLogical.dy / size.height) * 2.0;
+    final aspect = size.width / size.height;
+    final tanHalf = math.tan(_kPickVfov / 2.0);
+
+    // Ray direction through the tapped pixel (need not be normalized for the
+    // Möller–Trumbore test, but we normalize so `t` reads as a world distance).
+    final dir = (forward +
+            right * (ndcX * tanHalf * aspect) +
+            camUp * (ndcY * tanHalf))
+        .normalized();
+
+    // Bake in the same fit transform _applyMode applies: world = (p-center)*fit
+    // where fit = _kFitRadius / (camDistance/3).
+    final modelRadius = p.camDistance / 3.0;
+    final fit = modelRadius > 1e-9 ? _kFitRadius / modelRadius : 1.0;
+    final req = PivotPickRequest(
+      positions: p.positions,
+      indices: p.indices,
+      triangleCount: p.triangleCount,
+      fit: fit,
+      centerX: p.centerX,
+      centerY: p.centerY,
+      centerZ: p.centerZ,
+      ox: eye.x,
+      oy: eye.y,
+      oz: eye.z,
+      dx: dir.x,
+      dy: dir.y,
+      dz: dir.z,
+    );
+
+    final seq = ++_pivotPickSeq;
+    Vector3? hit;
+    if (p.triangleCount > _kPickInlineMaxTris) {
+      hit = await compute(nearestPivotHit, req);
+    } else {
+      hit = nearestPivotHit(req);
+    }
+    // Drop the result if we were disposed, the model changed, or a newer tap
+    // superseded this one while compute() was running.
+    if (!mounted || seq != _pivotPickSeq || !identical(_model, p)) return;
+    if (hit == null) return; // missed every triangle — leave the pivot put
+
+    // Clamp the new pivot near the origin so a grazing hit on a huge stray
+    // triangle can't fling the camera target out of frame (the model is
+    // normalized to ~_kFitRadius about the origin).
+    const maxOffset = _kFitRadius * 2.0;
+    if (hit.length > maxOffset) hit.scale(maxOffset / hit.length);
+    _target.setFrom(hit);
+    _requestCamera();
   }
 
   // --- Lens / projection presets (#9) ---------------------------------------
@@ -1400,10 +1503,21 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     if (!_hasModel || viewer == null) {
       return ColoredBox(color: widget.background);
     }
-    return GestureDetector(
-      onScaleStart: _onScaleStart,
-      onScaleUpdate: _onScaleUpdate,
-      child: ThermionWidget(viewer: viewer),
+    // LayoutBuilder gives us the live logical widget size, which the pivot
+    // ray-cast (#8) needs to map a tapped point to NDC.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        _lastSize = constraints.biggest;
+        return GestureDetector(
+          onScaleStart: _onScaleStart,
+          onScaleUpdate: _onScaleUpdate,
+          // Double-tap → set the orbit pivot to the model point under the
+          // finger (#8). onDoubleTapDown carries the tap position; onScale*
+          // keeps handling orbit/zoom/pan as before.
+          onDoubleTapDown: (d) => _pickPivot(d.localPosition),
+          child: ThermionWidget(viewer: viewer),
+        );
+      },
     );
   }
 }
