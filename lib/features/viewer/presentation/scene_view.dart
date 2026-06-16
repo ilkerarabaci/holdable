@@ -234,6 +234,106 @@ GroundPlaneGeometry buildGroundPlane({required double y, required double half}) 
   return GroundPlaneGeometry(positions, normals, indices);
 }
 
+// --- CPU pivot ray-cast (#8) -------------------------------------------------
+//
+// Double-tap sets the orbit pivot to the point on the model under the finger.
+// We DON'T use Filament's GPU View.pick: its readback is unverified on this
+// Adreno device and risks a native segfault we can't device-test before
+// shipping. So picking is pure CPU — build the camera ray from the live camera
+// matrices, then intersect the parsed mesh triangles with Möller–Trumbore.
+
+/// Möller–Trumbore ray/triangle intersection. Returns the distance `t` along
+/// [dir] (in [dir]'s length units, t > [epsilon]) at the front-or-back hit, or
+/// null on a miss / parallel ray. [dir] need not be normalized. Two-sided (we
+/// don't cull by winding — OBJ/STL winding is inconsistent). Pure + unit-tested.
+double? rayTriangleIntersection(
+  Vector3 origin,
+  Vector3 dir,
+  Vector3 v0,
+  Vector3 v1,
+  Vector3 v2, {
+  double epsilon = 1e-7,
+}) {
+  final edge1 = v1 - v0;
+  final edge2 = v2 - v0;
+  final pvec = dir.cross(edge2);
+  final det = edge1.dot(pvec);
+  if (det.abs() < epsilon) return null; // ray parallel to the triangle
+  final invDet = 1.0 / det;
+  final tvec = origin - v0;
+  final u = tvec.dot(pvec) * invDet;
+  if (u < 0.0 || u > 1.0) return null;
+  final qvec = tvec.cross(edge1);
+  final v = dir.dot(qvec) * invDet;
+  if (v < 0.0 || u + v > 1.0) return null;
+  final t = edge2.dot(qvec) * invDet;
+  if (t <= epsilon) return null; // behind the ray origin
+  return t;
+}
+
+/// Inputs for the off-isolate nearest-triangle search (#8). All fields are
+/// isolate-sendable (typed lists + doubles): the mesh is transformed by the
+/// same fit (scale about origin after centering) that `_applyMode` applies, so
+/// the ray (already in world space) hits where the model is actually drawn.
+class _PivotPickRequest {
+  const _PivotPickRequest({
+    required this.positions,
+    required this.indices,
+    required this.triangleCount,
+    required this.fit,
+    required this.centerX,
+    required this.centerY,
+    required this.centerZ,
+    required this.ox,
+    required this.oy,
+    required this.oz,
+    required this.dx,
+    required this.dy,
+    required this.dz,
+  });
+  final Float32List positions;
+  final List<int> indices;
+  final int triangleCount;
+  final double fit; // uniform fit scale
+  final double centerX, centerY, centerZ; // model center (pre-scale)
+  final double ox, oy, oz; // ray origin (world)
+  final double dx, dy, dz; // ray direction (world, need not be unit)
+}
+
+/// Returns the nearest world-space hit point of the request's ray against the
+/// transformed mesh, or null if the ray misses every triangle. Top-level so it
+/// can run via `compute()` for large meshes; also called inline for small ones.
+Vector3? nearestPivotHit(_PivotPickRequest r) {
+  final origin = Vector3(r.ox, r.oy, r.oz);
+  final dir = Vector3(r.dx, r.dy, r.dz);
+  final tris = math.min(r.triangleCount, r.indices.length ~/ 3);
+  double bestT = double.infinity;
+  for (var t = 0; t < tris; t++) {
+    final i0 = r.indices[t * 3], i1 = r.indices[t * 3 + 1], i2 = r.indices[t * 3 + 2];
+    final a0 = i0 * 3, a1 = i1 * 3, a2 = i2 * 3;
+    // World vertex = (p - center) * fit  (matches _applyMode's S·T(-center)).
+    final v0 = Vector3(
+      (r.positions[a0] - r.centerX) * r.fit,
+      (r.positions[a0 + 1] - r.centerY) * r.fit,
+      (r.positions[a0 + 2] - r.centerZ) * r.fit,
+    );
+    final v1 = Vector3(
+      (r.positions[a1] - r.centerX) * r.fit,
+      (r.positions[a1 + 1] - r.centerY) * r.fit,
+      (r.positions[a1 + 2] - r.centerZ) * r.fit,
+    );
+    final v2 = Vector3(
+      (r.positions[a2] - r.centerX) * r.fit,
+      (r.positions[a2 + 1] - r.centerY) * r.fit,
+      (r.positions[a2 + 2] - r.centerZ) * r.fit,
+    );
+    final hit = rayTriangleIntersection(origin, dir, v0, v1, v2);
+    if (hit != null && hit < bestT) bestT = hit;
+  }
+  if (!bestT.isFinite) return null;
+  return origin + dir * bestT;
+}
+
 class _ModelSceneViewState extends State<ModelSceneView> {
   ThermionViewer? _viewer;
   Camera? _camera;
