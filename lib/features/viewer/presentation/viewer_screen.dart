@@ -71,9 +71,14 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   static const _kLightIntensityKey = 'viewer_light_intensity';
   static const _kLightAngleKey = 'viewer_light_angle';
   static const _kEnvironmentKey = 'viewer_light_environment';
+  // Lens/projection preset (Faz B #9) — screen-owned + persisted for the same
+  // reason as the light settings: survive the Render panel rebuilding on tab
+  // switch and survive re-opening the viewer.
+  static const _kProjectionKey = 'viewer_projection';
   double _lightIntensity = 1.0;
   double _lightAngle = 0.0;
   double _environment = 0.0;
+  String _projection = '70mm';
   bool _lightApplied = false; // persisted light pushed to the scene once ready
 
   void _saveLight() {
@@ -91,6 +96,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     _lightIntensity = prefs.getDouble(_kLightIntensityKey) ?? 1.0;
     _lightAngle = prefs.getDouble(_kLightAngleKey) ?? 0.0;
     _environment = prefs.getDouble(_kEnvironmentKey) ?? 0.0;
+    _projection = prefs.getString(_kProjectionKey) ?? '70mm';
     GpuSupport.isSupported().then((ok) {
       if (mounted) setState(() => _gpuSupported = ok);
     });
@@ -126,6 +132,9 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         if (_lightIntensity != 1.0) _scene.setLightIntensity(_lightIntensity);
         if (_lightAngle != 0.0) _scene.setLightAngle(_lightAngle);
         if (_environment != 0.0) _scene.setEnvironment(_environment);
+        // Push the persisted lens preset (Faz B #9). The scene defaults to
+        // '70mm', so only a non-default needs asserting over it.
+        if (_projection != '70mm') _scene.setProjection(_projection);
       }
     }
 
@@ -308,6 +317,14 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                   onColor: _scene.setColor,
                   onShading: _scene.setShading,
                   onTexture: _scene.setTextureAsset,
+                  projection: _projection,
+                  onProjection: (p) {
+                    _projection = p;
+                    _scene.setProjection(p);
+                    ref
+                        .read(sharedPreferencesProvider)
+                        .setString(_kProjectionKey, p);
+                  },
                   intensity: _lightIntensity,
                   angle: _lightAngle,
                   environment: _environment,
@@ -571,6 +588,8 @@ class _RenderPanel extends StatefulWidget {
     required this.onColor,
     required this.onTexture,
     required this.onShading,
+    required this.projection,
+    required this.onProjection,
     required this.intensity,
     required this.angle,
     required this.environment,
@@ -586,6 +605,11 @@ class _RenderPanel extends StatefulWidget {
 
   /// Bundled texture asset path, or null for "None" (back to flat color).
   final ValueChanged<String?> onTexture;
+
+  /// Current lens preset ('70mm' | '24mm' | 'fisheye' | 'ortho') and its setter
+  /// (Faz B #9). Owned by the parent so it survives this panel rebuilding.
+  final String projection;
+  final ValueChanged<String> onProjection;
 
   /// Current light values, owned by the parent screen so they survive this
   /// panel being rebuilt on every tab switch (and are persisted across
@@ -707,6 +731,32 @@ class _RenderPanelState extends State<_RenderPanel> {
                 label: 'X-ray',
                 tooltip: 'See-through surfaces',
                 onTap: () => widget.onMode('xray')),
+          ]),
+          const SizedBox(height: 14),
+          Text('LENS',
+              style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  letterSpacing: 1,
+                  color: c.textMuted)),
+          const SizedBox(height: 10),
+          Wrap(spacing: 10, children: [
+            _Chip(
+                label: 'Ortho',
+                tooltip: 'No perspective — parallel, technical-drawing look',
+                onTap: () => widget.onProjection('ortho')),
+            _Chip(
+                label: 'Fisheye',
+                tooltip: 'Ultra-wide angle — exaggerated perspective',
+                onTap: () => widget.onProjection('fisheye')),
+            _Chip(
+                label: '70mm',
+                tooltip: 'Default lens — natural perspective',
+                onTap: () => widget.onProjection('70mm')),
+            _Chip(
+                label: '24mm',
+                tooltip: 'Wide lens — more perspective than the default',
+                onTap: () => widget.onProjection('24mm')),
           ]),
           const SizedBox(height: 14),
           Text('SHADING',

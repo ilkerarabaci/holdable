@@ -48,6 +48,10 @@ class ModelSceneController {
   void setRenderMode(String mode) => _state?._setRenderMode(mode);
   void setView(String preset) => _state?._setPreset(preset);
 
+  /// Camera lens/projection preset: '70mm' (default), '24mm', 'fisheye' or
+  /// 'ortho'. Changes the focal length / projection without moving the orbit.
+  void setProjection(String preset) => _state?._setProjection(preset);
+
   /// Hand-tracking control (F4): drive the framing from a gesture pose instead
   /// of touch. [yaw] rotates the model (orbit azimuth), [scale] zooms (≥1 =
   /// bigger), [tx]/[ty] pan it in-frame (normalized −1..1). See hand_gesture.dart.
@@ -152,6 +156,42 @@ const List<(double, double, double, double)> _kLightRig = [
   (-0.1, -0.9, 0.3, 14000),
 ];
 
+/// Resolved camera projection parameters for a lens preset (#9). One of these
+/// is non-null per preset, telling [_ModelSceneViewState._applyProjection]
+/// which Filament projection call to make:
+/// - [focalLength] (mm) → `Camera.setLensProjection` (the two perspective
+///   presets, 70mm tele-ish and 24mm wide),
+/// - [fovDegrees] (vertical FoV) → `setProjectionFromVerticalFieldOfView`
+///   (the ultra-wide "fisheye" look — NOT a true fisheye, just a very wide FoV),
+/// - [ortho] true → an orthographic projection sized from the fit radius.
+///
+/// Pure data (no GPU/aspect) so the preset→params mapping is unit-testable.
+class LensParams {
+  const LensParams({this.focalLength, this.fovDegrees, this.ortho = false});
+  final double? focalLength; // mm, for setLensProjection
+  final double? fovDegrees; // vertical FoV, for the ultra-wide preset
+  final bool ortho; // orthographic projection
+}
+
+/// Maps a lens preset name to its [LensParams]. Unknown values fall back to the
+/// 70mm default. Pure — no viewer/aspect needed — so a test can assert the
+/// mapping without a Filament context.
+LensParams lensParamsFor(String preset) {
+  switch (preset) {
+    case '24mm':
+      return const LensParams(focalLength: 24);
+    case 'fisheye':
+      // Ultra-wide vertical FoV — an exaggerated wide-angle look, NOT a true
+      // (mapped) fisheye, which the ubershader can't do.
+      return const LensParams(fovDegrees: 120);
+    case 'ortho':
+      return const LensParams(ortho: true);
+    case '70mm':
+    default:
+      return const LensParams(focalLength: 70);
+  }
+}
+
 class _ModelSceneViewState extends State<ModelSceneView> {
   ThermionViewer? _viewer;
   Camera? _camera;
@@ -193,6 +233,11 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   String _mode = 'solid';
   Color _baseColor = _kNeutral;
   double _currentAlpha = 1.0; // 0.35 in x-ray
+
+  /// Camera lens/projection preset (#9): '70mm' (default), '24mm', 'fisheye'
+  /// (ultra-wide) or 'ortho'. Re-applied after every (re)frame because the
+  /// ThermionWidget re-applies its own lens projection on texture realloc.
+  String _projection = '70mm';
 
   // --- Texture state. The ENCODED image (PNG/JPEG bytes) is retained so
   // render-mode rebuilds (new material) can re-apply the texture; decoding
@@ -360,6 +405,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       _camera = camera;
       _viewerReady = true;
       if (_model != null) await _applyMode(_mode, frame: true);
+      // Apply the lens preset (#9) once the camera exists. _applyMode(frame:)
+      // re-applies it after framing too; this covers the no-model-yet path.
+      await _applyProjection();
     } catch (e) {
       if (mounted) widget.onStatus(ModelSceneStatus(loading: false, error: '$e'));
     }
@@ -569,6 +617,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         _elevation = _isoElevation;
         _target.setZero();
         await _applyCameraNow();
+        // Re-apply the lens preset (#9): ThermionWidget re-applies its own
+        // setLensProjection on every texture realloc (which this rebuild can
+        // trigger), clobbering ortho/fisheye — so reassert it after framing.
+        await _applyProjection();
       }
 
       if (!_hasModel || frame) {
@@ -711,6 +763,52 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     }
     _target.setZero(); // recenter when snapping to a preset
     await _applyCameraNow();
+  }
+
+  // --- Lens / projection presets (#9) ---------------------------------------
+
+  /// Switches the camera lens/projection [p] ('70mm' | '24mm' | 'fisheye' |
+  /// 'ortho'): records it on the state (so reframes re-assert it) and applies
+  /// it now. SharedPreferences persistence is the host screen's job.
+  Future<void> _setProjection(String p) async {
+    _projection = p;
+    await _applyProjection();
+  }
+
+  /// Applies the active [_projection] preset to the camera. Best-effort: a
+  /// failure leaves the previous projection in place (no crash). The aspect is
+  /// read live from the physical viewport so the framing isn't stretched.
+  Future<void> _applyProjection() async {
+    final cam = _camera;
+    final viewer = _viewer;
+    if (cam == null || viewer == null) return;
+    try {
+      final vp = await viewer.view.getViewport();
+      if (vp.width <= 0 || vp.height <= 0) return;
+      final aspect = vp.width / vp.height;
+      final lens = lensParamsFor(_projection);
+      if (lens.ortho) {
+        // Orthographic: size the half-height to comfortably contain the model
+        // (normalized to _kFitRadius about the origin) with a little margin,
+        // then widen by aspect so it isn't stretched.
+        final h = _kFitRadius * 1.2;
+        final w = h * aspect;
+        await cam.setProjection(
+            Projection.Orthographic, -w, w, -h, h, 0.1, 100.0);
+      } else if (lens.fovDegrees != null) {
+        // Ultra-wide vertical FoV (the "fisheye" preset — exaggerated wide
+        // angle, NOT a true fisheye projection).
+        await cam.setProjectionFromVerticalFieldOfView(
+            lens.fovDegrees!, 0.1, 100.0, aspect);
+      } else {
+        await cam.setLensProjection(
+          near: 0.1,
+          far: 100.0,
+          aspect: aspect,
+          focalLength: lens.focalLength!,
+        );
+      }
+    } catch (_) {/* keep the prior projection */}
   }
 
   /// Drives the framing from a hand-gesture pose (F4). Maps the controller's
