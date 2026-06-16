@@ -48,6 +48,14 @@ class ModelSceneController {
   void setRenderMode(String mode) => _state?._setRenderMode(mode);
   void setView(String preset) => _state?._setPreset(preset);
 
+  /// Camera lens/projection preset: '70mm' (default), '24mm', 'fisheye' or
+  /// 'ortho'. Changes the focal length / projection without moving the orbit.
+  void setProjection(String preset) => _state?._setProjection(preset);
+
+  /// Toggles a ground/contact shadow under the model (#4): a shadow-catcher
+  /// plane plus one overhead shadow-casting sun. Off by default.
+  void setGroundShadow(bool on) => _state?._setGroundShadow(on);
+
   /// Hand-tracking control (F4): drive the framing from a gesture pose instead
   /// of touch. [yaw] rotates the model (orbit azimuth), [scale] zooms (≥1 =
   /// bigger), [tx]/[ty] pan it in-frame (normalized −1..1). See hand_gesture.dart.
@@ -152,6 +160,180 @@ const List<(double, double, double, double)> _kLightRig = [
   (-0.1, -0.9, 0.3, 14000),
 ];
 
+/// Resolved camera projection parameters for a lens preset (#9). One of these
+/// is non-null per preset, telling [_ModelSceneViewState._applyProjection]
+/// which Filament projection call to make:
+/// - [focalLength] (mm) → `Camera.setLensProjection` (the two perspective
+///   presets, 70mm tele-ish and 24mm wide),
+/// - [fovDegrees] (vertical FoV) → `setProjectionFromVerticalFieldOfView`
+///   (the ultra-wide "fisheye" look — NOT a true fisheye, just a very wide FoV),
+/// - [ortho] true → an orthographic projection sized from the fit radius.
+///
+/// Pure data (no GPU/aspect) so the preset→params mapping is unit-testable.
+class LensParams {
+  const LensParams({this.focalLength, this.fovDegrees, this.ortho = false});
+  final double? focalLength; // mm, for setLensProjection
+  final double? fovDegrees; // vertical FoV, for the ultra-wide preset
+  final bool ortho; // orthographic projection
+}
+
+/// Maps a lens preset name to its [LensParams]. Unknown values fall back to the
+/// 70mm default. Pure — no viewer/aspect needed — so a test can assert the
+/// mapping without a Filament context.
+LensParams lensParamsFor(String preset) {
+  switch (preset) {
+    case '24mm':
+      return const LensParams(focalLength: 24);
+    case 'fisheye':
+      // Ultra-wide vertical FoV — an exaggerated wide-angle look, NOT a true
+      // (mapped) fisheye, which the ubershader can't do.
+      return const LensParams(fovDegrees: 120);
+    case 'ortho':
+      return const LensParams(ortho: true);
+    case '70mm':
+    default:
+      return const LensParams(focalLength: 70);
+  }
+}
+
+/// A flat shadow-catcher quad (#4) in the model's normalized space.
+class GroundPlaneGeometry {
+  const GroundPlaneGeometry(this.positions, this.normals, this.indices);
+
+  /// 4 corner vertices, 3 floats each (x,y,z).
+  final Float32List positions;
+
+  /// Per-vertex up normal (0,1,0), 3 floats each.
+  final Float32List normals;
+
+  /// Two triangles (6 indices) winding CCW when viewed from above (+Y).
+  final List<int> indices;
+}
+
+/// Builds a horizontal shadow-catcher quad sitting at [y] (the model's bottom),
+/// spanning ±[half] in x and z, with an up normal. The model is normalized so
+/// its bounding sphere has radius [_kFitRadius] about the origin, so callers
+/// pass `y = -_kFitRadius` (bottom) and `half = _kFitRadius * 4` (a generous
+/// floor for the shadow to land on). Pure — unit-tested without a GPU.
+GroundPlaneGeometry buildGroundPlane({required double y, required double half}) {
+  final positions = Float32List.fromList(<double>[
+    -half, y, -half, // 0
+    half, y, -half, // 1
+    half, y, half, // 2
+    -half, y, half, // 3
+  ]);
+  final normals = Float32List.fromList(<double>[
+    0, 1, 0,
+    0, 1, 0,
+    0, 1, 0,
+    0, 1, 0,
+  ]);
+  // CCW from above so the up-facing side is front: (0,1,2) + (0,2,3). USHORT
+  // typed (matching IndexType.USHORT and the rest of the createGeometry calls).
+  final indices = Uint16List.fromList(<int>[0, 1, 2, 0, 2, 3]);
+  return GroundPlaneGeometry(positions, normals, indices);
+}
+
+// --- CPU pivot ray-cast (#8) -------------------------------------------------
+//
+// Double-tap sets the orbit pivot to the point on the model under the finger.
+// We DON'T use Filament's GPU View.pick: its readback is unverified on this
+// Adreno device and risks a native segfault we can't device-test before
+// shipping. So picking is pure CPU — build the camera ray from the live camera
+// matrices, then intersect the parsed mesh triangles with Möller–Trumbore.
+
+/// Möller–Trumbore ray/triangle intersection. Returns the distance `t` along
+/// [dir] (in [dir]'s length units, t > [epsilon]) at the front-or-back hit, or
+/// null on a miss / parallel ray. [dir] need not be normalized. Two-sided (we
+/// don't cull by winding — OBJ/STL winding is inconsistent). Pure + unit-tested.
+double? rayTriangleIntersection(
+  Vector3 origin,
+  Vector3 dir,
+  Vector3 v0,
+  Vector3 v1,
+  Vector3 v2, {
+  double epsilon = 1e-7,
+}) {
+  final edge1 = v1 - v0;
+  final edge2 = v2 - v0;
+  final pvec = dir.cross(edge2);
+  final det = edge1.dot(pvec);
+  if (det.abs() < epsilon) return null; // ray parallel to the triangle
+  final invDet = 1.0 / det;
+  final tvec = origin - v0;
+  final u = tvec.dot(pvec) * invDet;
+  if (u < 0.0 || u > 1.0) return null;
+  final qvec = tvec.cross(edge1);
+  final v = dir.dot(qvec) * invDet;
+  if (v < 0.0 || u + v > 1.0) return null;
+  final t = edge2.dot(qvec) * invDet;
+  if (t <= epsilon) return null; // behind the ray origin
+  return t;
+}
+
+/// Inputs for the off-isolate nearest-triangle search (#8). All fields are
+/// isolate-sendable (typed lists + doubles): the mesh is transformed by the
+/// same fit (scale about origin after centering) that `_applyMode` applies, so
+/// the ray (already in world space) hits where the model is actually drawn.
+class PivotPickRequest {
+  const PivotPickRequest({
+    required this.positions,
+    required this.indices,
+    required this.triangleCount,
+    required this.fit,
+    required this.centerX,
+    required this.centerY,
+    required this.centerZ,
+    required this.ox,
+    required this.oy,
+    required this.oz,
+    required this.dx,
+    required this.dy,
+    required this.dz,
+  });
+  final Float32List positions;
+  final List<int> indices;
+  final int triangleCount;
+  final double fit; // uniform fit scale
+  final double centerX, centerY, centerZ; // model center (pre-scale)
+  final double ox, oy, oz; // ray origin (world)
+  final double dx, dy, dz; // ray direction (world, need not be unit)
+}
+
+/// Returns the nearest world-space hit point of the request's ray against the
+/// transformed mesh, or null if the ray misses every triangle. Top-level so it
+/// can run via `compute()` for large meshes; also called inline for small ones.
+Vector3? nearestPivotHit(PivotPickRequest r) {
+  final origin = Vector3(r.ox, r.oy, r.oz);
+  final dir = Vector3(r.dx, r.dy, r.dz);
+  final tris = math.min(r.triangleCount, r.indices.length ~/ 3);
+  double bestT = double.infinity;
+  for (var t = 0; t < tris; t++) {
+    final i0 = r.indices[t * 3], i1 = r.indices[t * 3 + 1], i2 = r.indices[t * 3 + 2];
+    final a0 = i0 * 3, a1 = i1 * 3, a2 = i2 * 3;
+    // World vertex = (p - center) * fit  (matches _applyMode's S·T(-center)).
+    final v0 = Vector3(
+      (r.positions[a0] - r.centerX) * r.fit,
+      (r.positions[a0 + 1] - r.centerY) * r.fit,
+      (r.positions[a0 + 2] - r.centerZ) * r.fit,
+    );
+    final v1 = Vector3(
+      (r.positions[a1] - r.centerX) * r.fit,
+      (r.positions[a1 + 1] - r.centerY) * r.fit,
+      (r.positions[a1 + 2] - r.centerZ) * r.fit,
+    );
+    final v2 = Vector3(
+      (r.positions[a2] - r.centerX) * r.fit,
+      (r.positions[a2 + 1] - r.centerY) * r.fit,
+      (r.positions[a2 + 2] - r.centerZ) * r.fit,
+    );
+    final hit = rayTriangleIntersection(origin, dir, v0, v1, v2);
+    if (hit != null && hit < bestT) bestT = hit;
+  }
+  if (!bestT.isFinite) return null;
+  return origin + dir * bestT;
+}
+
 class _ModelSceneViewState extends State<ModelSceneView> {
   ThermionViewer? _viewer;
   Camera? _camera;
@@ -193,6 +375,11 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   String _mode = 'solid';
   Color _baseColor = _kNeutral;
   double _currentAlpha = 1.0; // 0.35 in x-ray
+
+  /// Camera lens/projection preset (#9): '70mm' (default), '24mm', 'fisheye'
+  /// (ultra-wide) or 'ortho'. Re-applied after every (re)frame because the
+  /// ThermionWidget re-applies its own lens projection on texture realloc.
+  String _projection = '70mm';
 
   // --- Texture state. The ENCODED image (PNG/JPEG bytes) is retained so
   // render-mode rebuilds (new material) can re-apply the texture; decoding
@@ -249,6 +436,13 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   double _lightIntensity = 1.0;
   double _lightAzimuth = 0.0;
   bool _iblLoaded = false; // image-based-lighting environment currently active
+
+  // --- Ground/contact shadow (#4). Off by default. The shadow-catcher quad
+  // and its dedicated overhead castShadows sun are kept OUT of [_lights] so the
+  // intensity-rig rebuild in _setLightIntensity never drops the shadow light. ---
+  bool _groundShadow = false;
+  ThermionEntity? _shadowLight; // overhead sun that casts the shadow
+  ThermionAsset? _groundPlane; // shadow-catcher quad asset
   bool _rebuilding = false;
   String? _pendingMode; // latest mode requested while a rebuild was in flight
 
@@ -360,6 +554,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       _camera = camera;
       _viewerReady = true;
       if (_model != null) await _applyMode(_mode, frame: true);
+      // Apply the lens preset (#9) once the camera exists. _applyMode(frame:)
+      // re-applies it after framing too; this covers the no-model-yet path.
+      await _applyProjection();
     } catch (e) {
       if (mounted) widget.onStatus(ModelSceneStatus(loading: false, error: '$e'));
     }
@@ -569,6 +766,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         _elevation = _isoElevation;
         _target.setZero();
         await _applyCameraNow();
+        // Re-apply the lens preset (#9): ThermionWidget re-applies its own
+        // setLensProjection on every texture realloc (which this rebuild can
+        // trigger), clobbering ortho/fisheye — so reassert it after framing.
+        await _applyProjection();
       }
 
       if (!_hasModel || frame) {
@@ -711,6 +912,139 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     }
     _target.setZero(); // recenter when snapping to a preset
     await _applyCameraNow();
+  }
+
+  // --- Lens / projection presets (#9) ---------------------------------------
+
+  /// Switches the camera lens/projection [p] ('70mm' | '24mm' | 'fisheye' |
+  /// 'ortho'): records it on the state (so reframes re-assert it) and applies
+  /// it now. SharedPreferences persistence is the host screen's job.
+  Future<void> _setProjection(String p) async {
+    _projection = p;
+    await _applyProjection();
+  }
+
+  /// Applies the active [_projection] preset to the camera. Best-effort: a
+  /// failure leaves the previous projection in place (no crash). The aspect is
+  /// read live from the physical viewport so the framing isn't stretched.
+  Future<void> _applyProjection() async {
+    final cam = _camera;
+    final viewer = _viewer;
+    if (cam == null || viewer == null) return;
+    try {
+      final vp = await viewer.view.getViewport();
+      if (vp.width <= 0 || vp.height <= 0) return;
+      final aspect = vp.width / vp.height;
+      final lens = lensParamsFor(_projection);
+      if (lens.ortho) {
+        // Orthographic: size the half-height to comfortably contain the model
+        // (normalized to _kFitRadius about the origin) with a little margin,
+        // then widen by aspect so it isn't stretched.
+        final h = _kFitRadius * 1.2;
+        final w = h * aspect;
+        await cam.setProjection(
+            Projection.Orthographic, -w, w, -h, h, 0.1, 100.0);
+      } else if (lens.fovDegrees != null) {
+        // Ultra-wide vertical FoV (the "fisheye" preset — exaggerated wide
+        // angle, NOT a true fisheye projection).
+        await cam.setProjectionFromVerticalFieldOfView(
+            lens.fovDegrees!, 0.1, 100.0, aspect);
+      } else {
+        await cam.setLensProjection(
+          near: 0.1,
+          far: 100.0,
+          aspect: aspect,
+          focalLength: lens.focalLength!,
+        );
+      }
+    } catch (_) {/* keep the prior projection */}
+  }
+
+  // --- Ground/contact shadow (#4) -------------------------------------------
+
+  /// Toggles the ground/contact shadow. Best-effort + crash-resilient: this
+  /// device is an Adreno (S26 Ultra) with a history of GPU segfaults, so the
+  /// whole setup is wrapped — a throw degrades to "no shadow" rather than
+  /// crashing the viewer.
+  Future<void> _setGroundShadow(bool on) async {
+    if (on == _groundShadow) return;
+    _groundShadow = on;
+    if (on) {
+      await _enableGroundShadow();
+    } else {
+      await _disableGroundShadow();
+    }
+  }
+
+  /// Turns shadows on, adds a dedicated overhead castShadows sun (kept out of
+  /// [_lights]) and lays a shadow-catcher quad just under the model.
+  Future<void> _enableGroundShadow() async {
+    final viewer = _viewer;
+    if (viewer == null) return;
+    try {
+      await viewer.setShadowsEnabled(true);
+      // One overhead sun aimed almost straight down so the shadow falls neatly
+      // under the model. Kept OUT of _lights so _setLightIntensity's
+      // remove/re-add loop can't drop it.
+      _shadowLight ??= await viewer.addDirectLight(DirectLight.sun(
+        direction: Vector3(0.2, -1.0, 0.1)..normalize(),
+        intensity: 60000,
+        castShadows: true,
+      ));
+      if (_groundPlane == null) {
+        // Quad at the model's bottom (model is normalized to _kFitRadius about
+        // the origin, so bottom ≈ y = -_kFitRadius), spanning a generous floor.
+        final g = buildGroundPlane(y: -_kFitRadius, half: _kFitRadius * 4);
+        final geometry = Geometry(
+          g.positions,
+          g.indices,
+          normals: g.normals,
+          indexType: IndexType.USHORT,
+        );
+        // A pragmatic shadow-catcher (NOT a true transparent one): a lit quad
+        // tinted to the background, slightly darkened, so it reads as floor and
+        // the cast shadow shows on it without an obvious seam.
+        final material =
+            await FilamentApp.instance!.createUbershaderMaterialInstance(
+          doubleSided: true,
+        );
+        await material.setCullingMode(CullingMode.NONE);
+        final bg = widget.background;
+        const k = 0.82; // darken the background a touch
+        await material.setParameterFloat4(
+          'baseColorFactor',
+          _srgbToLinear(bg.r * k),
+          _srgbToLinear(bg.g * k),
+          _srgbToLinear(bg.b * k),
+          1.0,
+        );
+        final plane = await viewer.createGeometry(
+          geometry,
+          materialInstances: [material],
+          releaseSourceData: true,
+        );
+        _groundPlane = plane;
+        await viewer.addToScene(plane);
+      }
+    } catch (_) {
+      // GPU rejected the shadow setup — leave the model rendering normally.
+      _groundShadow = false;
+    }
+  }
+
+  /// Removes the shadow-catcher quad + overhead sun and disables shadows.
+  Future<void> _disableGroundShadow() async {
+    final viewer = _viewer;
+    if (viewer == null) return;
+    try {
+      final plane = _groundPlane;
+      _groundPlane = null;
+      if (plane != null) await viewer.destroyAsset(plane);
+      final light = _shadowLight;
+      _shadowLight = null;
+      if (light != null) await viewer.removeLight(light);
+      await viewer.setShadowsEnabled(false);
+    } catch (_) {/* best-effort teardown */}
   }
 
   /// Drives the framing from a hand-gesture pose (F4). Maps the controller's
