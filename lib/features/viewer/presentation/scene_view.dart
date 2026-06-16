@@ -52,6 +52,10 @@ class ModelSceneController {
   /// 'ortho'. Changes the focal length / projection without moving the orbit.
   void setProjection(String preset) => _state?._setProjection(preset);
 
+  /// Toggles a ground/contact shadow under the model (#4): a shadow-catcher
+  /// plane plus one overhead shadow-casting sun. Off by default.
+  void setGroundShadow(bool on) => _state?._setGroundShadow(on);
+
   /// Hand-tracking control (F4): drive the framing from a gesture pose instead
   /// of touch. [yaw] rotates the model (orbit azimuth), [scale] zooms (≥1 =
   /// bigger), [tx]/[ty] pan it in-frame (normalized −1..1). See hand_gesture.dart.
@@ -192,6 +196,44 @@ LensParams lensParamsFor(String preset) {
   }
 }
 
+/// A flat shadow-catcher quad (#4) in the model's normalized space.
+class GroundPlaneGeometry {
+  const GroundPlaneGeometry(this.positions, this.normals, this.indices);
+
+  /// 4 corner vertices, 3 floats each (x,y,z).
+  final Float32List positions;
+
+  /// Per-vertex up normal (0,1,0), 3 floats each.
+  final Float32List normals;
+
+  /// Two triangles (6 indices) winding CCW when viewed from above (+Y).
+  final List<int> indices;
+}
+
+/// Builds a horizontal shadow-catcher quad sitting at [y] (the model's bottom),
+/// spanning ±[half] in x and z, with an up normal. The model is normalized so
+/// its bounding sphere has radius [_kFitRadius] about the origin, so callers
+/// pass `y = -_kFitRadius` (bottom) and `half = _kFitRadius * 4` (a generous
+/// floor for the shadow to land on). Pure — unit-tested without a GPU.
+GroundPlaneGeometry buildGroundPlane({required double y, required double half}) {
+  final positions = Float32List.fromList(<double>[
+    -half, y, -half, // 0
+    half, y, -half, // 1
+    half, y, half, // 2
+    -half, y, half, // 3
+  ]);
+  final normals = Float32List.fromList(<double>[
+    0, 1, 0,
+    0, 1, 0,
+    0, 1, 0,
+    0, 1, 0,
+  ]);
+  // CCW from above so the up-facing side is front: (0,1,2) + (0,2,3). USHORT
+  // typed (matching IndexType.USHORT and the rest of the createGeometry calls).
+  final indices = Uint16List.fromList(<int>[0, 1, 2, 0, 2, 3]);
+  return GroundPlaneGeometry(positions, normals, indices);
+}
+
 class _ModelSceneViewState extends State<ModelSceneView> {
   ThermionViewer? _viewer;
   Camera? _camera;
@@ -294,6 +336,13 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   double _lightIntensity = 1.0;
   double _lightAzimuth = 0.0;
   bool _iblLoaded = false; // image-based-lighting environment currently active
+
+  // --- Ground/contact shadow (#4). Off by default. The shadow-catcher quad
+  // and its dedicated overhead castShadows sun are kept OUT of [_lights] so the
+  // intensity-rig rebuild in _setLightIntensity never drops the shadow light. ---
+  bool _groundShadow = false;
+  ThermionEntity? _shadowLight; // overhead sun that casts the shadow
+  ThermionAsset? _groundPlane; // shadow-catcher quad asset
   bool _rebuilding = false;
   String? _pendingMode; // latest mode requested while a rebuild was in flight
 
@@ -809,6 +858,93 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         );
       }
     } catch (_) {/* keep the prior projection */}
+  }
+
+  // --- Ground/contact shadow (#4) -------------------------------------------
+
+  /// Toggles the ground/contact shadow. Best-effort + crash-resilient: this
+  /// device is an Adreno (S26 Ultra) with a history of GPU segfaults, so the
+  /// whole setup is wrapped — a throw degrades to "no shadow" rather than
+  /// crashing the viewer.
+  Future<void> _setGroundShadow(bool on) async {
+    if (on == _groundShadow) return;
+    _groundShadow = on;
+    if (on) {
+      await _enableGroundShadow();
+    } else {
+      await _disableGroundShadow();
+    }
+  }
+
+  /// Turns shadows on, adds a dedicated overhead castShadows sun (kept out of
+  /// [_lights]) and lays a shadow-catcher quad just under the model.
+  Future<void> _enableGroundShadow() async {
+    final viewer = _viewer;
+    if (viewer == null) return;
+    try {
+      await viewer.setShadowsEnabled(true);
+      // One overhead sun aimed almost straight down so the shadow falls neatly
+      // under the model. Kept OUT of _lights so _setLightIntensity's
+      // remove/re-add loop can't drop it.
+      _shadowLight ??= await viewer.addDirectLight(DirectLight.sun(
+        direction: Vector3(0.2, -1.0, 0.1)..normalize(),
+        intensity: 60000,
+        castShadows: true,
+      ));
+      if (_groundPlane == null) {
+        // Quad at the model's bottom (model is normalized to _kFitRadius about
+        // the origin, so bottom ≈ y = -_kFitRadius), spanning a generous floor.
+        final g = buildGroundPlane(y: -_kFitRadius, half: _kFitRadius * 4);
+        final geometry = Geometry(
+          g.positions,
+          g.indices,
+          normals: g.normals,
+          indexType: IndexType.USHORT,
+        );
+        // A pragmatic shadow-catcher (NOT a true transparent one): a lit quad
+        // tinted to the background, slightly darkened, so it reads as floor and
+        // the cast shadow shows on it without an obvious seam.
+        final material =
+            await FilamentApp.instance!.createUbershaderMaterialInstance(
+          doubleSided: true,
+        );
+        await material.setCullingMode(CullingMode.NONE);
+        final bg = widget.background;
+        const k = 0.82; // darken the background a touch
+        await material.setParameterFloat4(
+          'baseColorFactor',
+          _srgbToLinear(bg.r * k),
+          _srgbToLinear(bg.g * k),
+          _srgbToLinear(bg.b * k),
+          1.0,
+        );
+        final plane = await viewer.createGeometry(
+          geometry,
+          materialInstances: [material],
+          releaseSourceData: true,
+        );
+        _groundPlane = plane;
+        await viewer.addToScene(plane);
+      }
+    } catch (_) {
+      // GPU rejected the shadow setup — leave the model rendering normally.
+      _groundShadow = false;
+    }
+  }
+
+  /// Removes the shadow-catcher quad + overhead sun and disables shadows.
+  Future<void> _disableGroundShadow() async {
+    final viewer = _viewer;
+    if (viewer == null) return;
+    try {
+      final plane = _groundPlane;
+      _groundPlane = null;
+      if (plane != null) await viewer.destroyAsset(plane);
+      final light = _shadowLight;
+      _shadowLight = null;
+      if (light != null) await viewer.removeLight(light);
+      await viewer.setShadowsEnabled(false);
+    } catch (_) {/* best-effort teardown */}
   }
 
   /// Drives the framing from a hand-gesture pose (F4). Maps the controller's

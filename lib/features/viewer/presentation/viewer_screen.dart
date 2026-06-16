@@ -75,10 +75,14 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   // reason as the light settings: survive the Render panel rebuilding on tab
   // switch and survive re-opening the viewer.
   static const _kProjectionKey = 'viewer_projection';
+  // Ground/contact shadow toggle (Faz B #4). Off by default until proven on
+  // device (Adreno GPU shadow risk).
+  static const _kGroundShadowKey = 'viewer_ground_shadow';
   double _lightIntensity = 1.0;
   double _lightAngle = 0.0;
   double _environment = 0.0;
   String _projection = '70mm';
+  bool _groundShadow = false;
   bool _lightApplied = false; // persisted light pushed to the scene once ready
 
   void _saveLight() {
@@ -97,6 +101,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     _lightAngle = prefs.getDouble(_kLightAngleKey) ?? 0.0;
     _environment = prefs.getDouble(_kEnvironmentKey) ?? 0.0;
     _projection = prefs.getString(_kProjectionKey) ?? '70mm';
+    _groundShadow = prefs.getBool(_kGroundShadowKey) ?? false;
     GpuSupport.isSupported().then((ok) {
       if (mounted) setState(() => _gpuSupported = ok);
     });
@@ -135,6 +140,9 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         // Push the persisted lens preset (Faz B #9). The scene defaults to
         // '70mm', so only a non-default needs asserting over it.
         if (_projection != '70mm') _scene.setProjection(_projection);
+        // Push the persisted ground-shadow toggle (Faz B #4). Scene defaults
+        // to off, so only enable needs asserting.
+        if (_groundShadow) _scene.setGroundShadow(true);
       }
     }
 
@@ -324,6 +332,14 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                     ref
                         .read(sharedPreferencesProvider)
                         .setString(_kProjectionKey, p);
+                  },
+                  groundShadow: _groundShadow,
+                  onGroundShadow: (on) {
+                    _groundShadow = on;
+                    _scene.setGroundShadow(on);
+                    ref
+                        .read(sharedPreferencesProvider)
+                        .setBool(_kGroundShadowKey, on);
                   },
                   intensity: _lightIntensity,
                   angle: _lightAngle,
@@ -590,6 +606,8 @@ class _RenderPanel extends StatefulWidget {
     required this.onShading,
     required this.projection,
     required this.onProjection,
+    required this.groundShadow,
+    required this.onGroundShadow,
     required this.intensity,
     required this.angle,
     required this.environment,
@@ -610,6 +628,11 @@ class _RenderPanel extends StatefulWidget {
   /// (Faz B #9). Owned by the parent so it survives this panel rebuilding.
   final String projection;
   final ValueChanged<String> onProjection;
+
+  /// Ground/contact shadow toggle (Faz B #4) + its setter. Parent-owned so it
+  /// survives the panel rebuilding and is persisted across sessions.
+  final bool groundShadow;
+  final ValueChanged<bool> onGroundShadow;
 
   /// Current light values, owned by the parent screen so they survive this
   /// panel being rebuilt on every tab switch (and are persisted across
@@ -642,6 +665,7 @@ class _RenderPanelState extends State<_RenderPanel> {
   late double _intensity = widget.intensity; // light-rig multiplier
   late double _angle = widget.angle; // rig azimuth, radians
   late double _environment = widget.environment; // IBL amount (0 = off)
+  late bool _groundShadow = widget.groundShadow; // contact shadow on/off
 
   void _pick(Color c) {
     // Color and texture are mutually exclusive — picking a color drops the
@@ -863,6 +887,31 @@ class _RenderPanelState extends State<_RenderPanel> {
             onChanged: (v) => setState(() => _environment = v),
             onChangeEnd: widget.onEnvironment,
           ),
+          // Ground/contact shadow (Faz B #4) — drops a soft shadow under the
+          // model onto a catcher plane. Off by default.
+          Row(children: [
+            Tooltip(
+              message: 'Drops a contact shadow under the model',
+              triggerMode: TooltipTriggerMode.tap,
+              showDuration: const Duration(seconds: 3),
+              child: Padding(
+                padding: const EdgeInsets.all(4),
+                child: Icon(LucideIcons.layers,
+                    size: 18, color: c.textMuted),
+              ),
+            ),
+            Expanded(
+              child: Text('Ground shadow',
+                  style: TextStyle(fontSize: 13, color: c.textPrimary)),
+            ),
+            Switch(
+              value: _groundShadow,
+              onChanged: (on) {
+                setState(() => _groundShadow = on);
+                widget.onGroundShadow(on);
+              },
+            ),
+          ]),
         ],
       ),
     );
