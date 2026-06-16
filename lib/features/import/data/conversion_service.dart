@@ -55,7 +55,7 @@ ConversionException _httpError(int code) {
 }
 
 /// State of an async (over-the-sync-cap) conversion job, polled from
-/// GET /jobs/<id>. Big files are converted in a Cloud Run Job, not in-request.
+/// `GET /jobs/<id>`. Big files convert in a Cloud Run Job, not in-request.
 class JobStatus {
   const JobStatus(
       {required this.state, this.phase, this.downloadUrl, this.error});

@@ -159,7 +159,7 @@ class ImportService {
       }
       const svc = ConversionService();
       final glb = bytes > kSyncConvertMax
-          ? await () async {
+          ? await (() async {
               // Big file → async Job. Stream the upload, poll, then download the
               // mobile-fit glb the Job produced.
               onConverting?.call();
@@ -169,7 +169,7 @@ class ImportService {
                 throw ConversionException(status.error ?? 'Conversion failed.');
               }
               return svc.downloadJobGlb(status.downloadUrl!);
-            }()
+            })()
           : await svc.convertToGlb(source.readAsBytesSync(), ext);
 
       if (_isDuplicate(name, glb.length, ModelFormat.glb) &&
