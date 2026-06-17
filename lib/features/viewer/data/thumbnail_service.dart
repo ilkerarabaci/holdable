@@ -20,7 +20,7 @@ import 'thumbnail_raster.dart';
 
 /// Version-stamped thumbnail file suffix. Bump the token when the rasterizer's
 /// output changes so old thumbnails are detected as stale and regenerated.
-const String kThumbnailVersionSuffix = '.t2.png';
+const String kThumbnailVersionSuffix = '.t3.png';
 
 const int _kSize = 256;
 const double _kAzimuth = math.pi / 4; // matches the viewer's default iso camera

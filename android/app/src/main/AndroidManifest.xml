@@ -11,18 +11,20 @@
         android:label="holdable"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
-        <!-- screenOrientation is locked to portrait (Faz B #9): the
-             ThermionWidget re-applies its own setLensProjection on every
-             texture reallocation, and a device rotation forces exactly such a
-             realloc — which clobbers the orthographic / ultra-wide lens presets
-             back to the default perspective. Pinning the orientation removes
-             that realloc path so the chosen lens preset sticks. -->
+        <!-- NOTE: alpha.49 added an app-wide android:screenOrientation="portrait"
+             so the #9 ortho/ultra-wide lens presets wouldn't be clobbered by
+             ThermionWidget's per-realloc setLensProjection on rotation. REMOVED
+             in alpha.50: an app-wide orientation lock conflicts with the AR
+             screen — ARCore surface detection needs free orientation, and the
+             lock is the prime suspect for the "AR can't find a surface"
+             regression. Trade-off: an ortho/ultra-wide lens reverts to
+             perspective if you rotate mid-view (minor; revisit with a
+             re-apply-on-resize hook in scene_view if it matters). -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:taskAffinity=""
-            android:screenOrientation="portrait"
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
