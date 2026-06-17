@@ -17,6 +17,7 @@ import 'package:thermion_flutter/thermion_flutter.dart' hide Material;
 
 import '../data/model_parser.dart';
 import '../data/thumbnail_raster.dart';
+import 'environment_backdrop.dart';
 
 /// Status pushed up to the host screen (drives the loading spinner + Info panel).
 class ModelSceneStatus {
@@ -86,9 +87,11 @@ class ModelSceneController {
   /// Rotates the whole light rig around Y by [azimuthRad] (relight angle).
   void setLightAngle(double azimuthRad) => _state?._setLightAzimuth(azimuthRad);
 
-  /// Environment (image-based) lighting amount 0..1 (0 = off; reflections +
-  /// soft ambient as it rises).
-  void setEnvironment(double amount) => _state?._setEnvironment(amount);
+  /// Selects the lighting environment (Faz C / PO #6): swings/recolors the
+  /// directional rig and loads/removes the bundled IBL to match the picked
+  /// procedural backdrop. The backdrop itself is a Flutter layer (see
+  /// EnvironmentBackdrop); this only drives the renderer's lighting.
+  void setEnvironment(AppEnvironment env) => _state?._setEnvironment(env);
 
   /// Applies a bundled texture asset (e.g. `assets/textures/wood.jpg`) to the
   /// model's surface, or removes any texture when [assetPath] is null (the
@@ -168,6 +171,63 @@ const List<(double, double, double, double)> _kLightRig = [
   (0.6, 0.2, 0.5, 18000),
   (-0.1, -0.9, 0.3, 14000),
 ];
+
+/// A pure light-rig preset for an [AppEnvironment] (Faz C / PO #6). It nudges
+/// the directional rig to *match* the procedural backdrop the user picked, and
+/// is COMPOSED on top of the user's own intensity/azimuth sliders (it never
+/// clobbers them — see `_setLightIntensity` / `_setLightAzimuth`):
+/// - [intensityScale] multiplies every sun's intensity (on top of the user's),
+/// - [azimuthBias] (radians) is added to the rig azimuth (swings the key),
+/// - [iblAmount] (0..1) is the bundled studio IBL strength (0 = no IBL),
+/// - [colorTemperature] (Kelvin, null = neutral) optionally warms/cools the rig.
+class EnvLightPreset {
+  const EnvLightPreset({
+    required this.intensityScale,
+    required this.azimuthBias,
+    required this.iblAmount,
+    this.colorTemperature,
+  });
+  final double intensityScale;
+  final double azimuthBias;
+  final double iblAmount;
+  final double? colorTemperature;
+}
+
+/// Maps an [AppEnvironment] to its [EnvLightPreset]. Pure (no GPU/viewer) so the
+/// env → light-preset contract is unit-testable. `none` is the neutral identity
+/// (the directional rig + filmic baseline, unchanged from before Faz C).
+EnvLightPreset environmentLightPreset(AppEnvironment env) {
+  switch (env) {
+    case AppEnvironment.none:
+      return const EnvLightPreset(
+          intensityScale: 1.0, azimuthBias: 0.0, iblAmount: 0.0);
+    case AppEnvironment.cafe:
+      // Warm side key swung toward frame-right (~3500K) — the café board's
+      // window-light look. No IBL (the bokeh backdrop carries the ambience).
+      return const EnvLightPreset(
+        intensityScale: 1.0,
+        azimuthBias: 0.6,
+        iblAmount: 0.0,
+        colorTemperature: 3500,
+      );
+    case AppEnvironment.sky:
+      // Bright top key + soft ambient from a gentle IBL (neutral daylight).
+      return const EnvLightPreset(
+        intensityScale: 1.15,
+        azimuthBias: 0.0,
+        iblAmount: 0.30,
+        colorTemperature: 6500,
+      );
+    case AppEnvironment.studio:
+      // Dual-softbox neutral: the brightest rig + the strongest IBL.
+      return const EnvLightPreset(
+        intensityScale: 1.25,
+        azimuthBias: 0.0,
+        iblAmount: 0.50,
+        colorTemperature: 6500,
+      );
+  }
+}
 
 /// Resolved camera projection parameters for a lens preset (#9). One of these
 /// is non-null per preset, telling [_ModelSceneViewState._applyProjection]
@@ -446,6 +506,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   double _lightIntensity = 1.0;
   double _lightAzimuth = 0.0;
   bool _iblLoaded = false; // image-based-lighting environment currently active
+  // Lighting environment preset (Faz C / PO #6): composed on top of the user's
+  // intensity/azimuth sliders when the rig is (re)built/(re)aimed.
+  EnvLightPreset _envPreset = environmentLightPreset(AppEnvironment.none);
 
   // --- Ground/contact shadow (#4). Off by default. The shadow-catcher quad
   // and its dedicated overhead castShadows sun are kept OUT of [_lights] so the
@@ -532,12 +595,13 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       final viewer = await ThermionFlutterPlugin.createViewer();
       await viewer.setPostProcessing(true);
       await viewer.setAntiAliasing(false, true, false); // FXAA
-      await viewer.setBackgroundColor(
-        widget.background.r,
-        widget.background.g,
-        widget.background.b,
-        1.0,
-      );
+      // Clear the skybox so the background is TRANSPARENT (Faz C / PO #6):
+      // Thermion renders transparent by default, and setBackgroundColor only
+      // looked opaque because it builds an opaque skybox. Removing the skybox
+      // lets the Flutter EnvironmentBackdrop behind the Thermion texture show
+      // through — it now owns the backdrop for ALL environments, including None
+      // (where it paints the same flat widget.background colour as before).
+      await viewer.removeSkybox();
       // No IBL/skybox is bundled, so lighting is entirely direct. With only a
       // key + fill + rim trio, a low-poly model (e.g. the 8-face octahedron) can
       // still have facets that face away from every light → pure black. Surround
@@ -547,8 +611,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       _lights.clear();
       for (final (x, y, z, inten) in _kLightRig) {
         final e = await viewer.addDirectLight(DirectLight.sun(
-          direction: _rotatedDir(x, y, z, _lightAzimuth),
-          intensity: inten * _lightIntensity,
+          direction:
+              _rotatedDir(x, y, z, _lightAzimuth + _envPreset.azimuthBias),
+          intensity: inten * _lightIntensity * _envPreset.intensityScale,
+          colorTemperature: _envPreset.colorTemperature,
           castShadows: false,
         ));
         _lights.add(e);
@@ -561,8 +627,8 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       } catch (_) {/* keep default tone mapping */}
       // Image-based lighting (bundled studio environment) is OFF by default —
       // it overexposed the look, and the directional rig + filmic is the better
-      // baseline. The user opts in + dials it via the Render panel's Environment
-      // slider (see _setEnvironment), which loads/removes the IBL on demand.
+      // baseline. The user opts in via the Render panel's Environment picker
+      // (see _setEnvironment), which loads/removes the IBL per the picked preset.
       final camera = await viewer.getActiveCamera();
       if (!mounted) {
         await viewer.dispose();
@@ -1227,39 +1293,54 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     return Vector3(x * ca + z * sa, y, -x * sa + z * ca)..normalize();
   }
 
-  /// Environment (image-based) lighting amount, 0..1. 0 removes the IBL (the
-  /// directional rig + filmic baseline); >0 loads the bundled studio IBL at a
-  /// proportional intensity for reflections + soft ambient. Best-effort. Call on
-  /// release — (re)loading the KTX isn't free.
-  Future<void> _setEnvironment(double amount) async {
+  /// Applies the lighting environment [env] (Faz C / PO #6): adopts its
+  /// [EnvLightPreset], RE-APPLIES the directional rig so the preset's intensity
+  /// scale / colour temperature / azimuth bias take effect (composed on top of
+  /// the user's sliders), and loads or removes the bundled studio IBL per the
+  /// preset's `iblAmount`. The visible backdrop is a separate Flutter layer
+  /// (EnvironmentBackdrop); this owns only the renderer's lighting.
+  ///
+  /// Best-effort + Adreno-safe: the whole thing is wrapped so a GPU reject
+  /// degrades to the previous lighting rather than crashing. Call on selection
+  /// — (re)loading the KTX + rebuilding the rig isn't free.
+  Future<void> _setEnvironment(AppEnvironment env) async {
     final v = _viewer;
     if (v == null) return;
-    final a = amount.clamp(0.0, 1.0);
+    _envPreset = environmentLightPreset(env);
     try {
-      if (a <= 0.01) {
+      // Re-apply the rig with the new preset (rebuild bakes the intensity scale
+      // + colour temperature; the re-aim folds in the azimuth bias).
+      await _rebuildRig();
+      await _setLightAzimuth(_lightAzimuth);
+      // IBL keyed off the preset's amount (was the old 0..1 slider). loadIbl
+      // replaces any existing IBL (destroyExisting); thermion resolves asset://
+      // via rootBundle. Map amount → a gentle 0..36000 intensity.
+      final ibl = _envPreset.iblAmount;
+      if (ibl <= 0.01) {
         if (_iblLoaded) {
           await v.removeIbl();
           _iblLoaded = false;
         }
       } else {
-        // loadIbl replaces any existing IBL (destroyExisting); thermion resolves
-        // asset:// via rootBundle. Map 0..1 → a gentle 0..36000 intensity.
         await v.loadIbl('asset://assets/env/studio_ibl.ktx',
-            intensity: a * 36000);
+            intensity: ibl * 36000);
         _iblLoaded = true;
       }
     } catch (_) {/* keep the directional rig as the only light */}
   }
 
   /// Re-aims every light for a new rig azimuth (cheap — direction only, no
-  /// re-creation). Live as the angle slider drags.
+  /// re-creation). Live as the angle slider drags. The active environment's
+  /// [EnvLightPreset.azimuthBias] is composed on top of the user's angle so the
+  /// café side-key swing survives a relight.
   Future<void> _setLightAzimuth(double az) async {
     _lightAzimuth = az;
     final v = _viewer;
     if (v == null) return;
     for (var i = 0; i < _lights.length && i < _kLightRig.length; i++) {
       final (x, y, z, _) = _kLightRig[i];
-      await v.setLightDirection(_lights[i], _rotatedDir(x, y, z, az));
+      await v.setLightDirection(
+          _lights[i], _rotatedDir(x, y, z, az + _envPreset.azimuthBias));
     }
   }
 
@@ -1267,6 +1348,17 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   /// intensity setter, so remove + re-add — lights are cheap). Call on release.
   Future<void> _setLightIntensity(double factor) async {
     _lightIntensity = factor.clamp(0.2, 2.5);
+    await _rebuildRig();
+  }
+
+  /// Remove + re-add the six-sun rig at the CURRENT user intensity/azimuth
+  /// COMPOSED with the active [_envPreset] (Faz C / PO #6): each sun's intensity
+  /// is `base · userIntensity · preset.intensityScale`, its azimuth is the
+  /// user's angle plus `preset.azimuthBias`, and its colour temperature is the
+  /// preset's (null = neutral). Thermion has no runtime intensity setter, so a
+  /// rebuild is the way to relight; lights are cheap. Used by both the intensity
+  /// slider and the environment picker.
+  Future<void> _rebuildRig() async {
     final v = _viewer;
     if (v == null) return;
     for (final e in _lights) {
@@ -1275,8 +1367,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     _lights.clear();
     for (final (x, y, z, inten) in _kLightRig) {
       final e = await v.addDirectLight(DirectLight.sun(
-        direction: _rotatedDir(x, y, z, _lightAzimuth),
-        intensity: inten * _lightIntensity,
+        direction: _rotatedDir(x, y, z, _lightAzimuth + _envPreset.azimuthBias),
+        intensity: inten * _lightIntensity * _envPreset.intensityScale,
+        colorTemperature: _envPreset.colorTemperature,
         castShadows: false,
       ));
       _lights.add(e);

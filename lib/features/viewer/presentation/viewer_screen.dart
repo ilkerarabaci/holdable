@@ -23,6 +23,7 @@ import '../data/bundled_textures.dart';
 import '../data/gpu_support.dart';
 import '../data/native_stats.dart';
 import '../data/thumbnail_service.dart' show kThumbnailVersionSuffix;
+import 'environment_backdrop.dart';
 import 'scene_view.dart';
 
 /// Interactive 3D viewer. Renders the model natively with Thermion (Google
@@ -70,7 +71,10 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   // defaults on every rebuild — the "sliders reset on exit/re-enter" bug.)
   static const _kLightIntensityKey = 'viewer_light_intensity';
   static const _kLightAngleKey = 'viewer_light_angle';
-  static const _kEnvironmentKey = 'viewer_light_environment';
+  // Faz C / PO #6: a NEW key (v2) — the value is now an AppEnvironment token
+  // String, not the old 0..1 double, so the old key would type-clash. The old
+  // 'viewer_light_environment' simply lapses (never read back).
+  static const _kEnvironmentKey = 'viewer_environment_v2';
   // Lens/projection preset (Faz B #9) — screen-owned + persisted for the same
   // reason as the light settings: survive the Render panel rebuilding on tab
   // switch and survive re-opening the viewer.
@@ -80,7 +84,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
   static const _kGroundShadowKey = 'viewer_ground_shadow';
   double _lightIntensity = 1.0;
   double _lightAngle = 0.0;
-  double _environment = 0.0;
+  AppEnvironment _environment = AppEnvironment.none;
   String _projection = '70mm';
   bool _groundShadow = false;
   bool _lightApplied = false; // persisted light pushed to the scene once ready
@@ -89,7 +93,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     final prefs = ref.read(sharedPreferencesProvider);
     prefs.setDouble(_kLightIntensityKey, _lightIntensity);
     prefs.setDouble(_kLightAngleKey, _lightAngle);
-    prefs.setDouble(_kEnvironmentKey, _environment);
+    prefs.setString(_kEnvironmentKey, _environment.token);
   }
 
   @override
@@ -99,7 +103,7 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     final prefs = ref.read(sharedPreferencesProvider);
     _lightIntensity = prefs.getDouble(_kLightIntensityKey) ?? 1.0;
     _lightAngle = prefs.getDouble(_kLightAngleKey) ?? 0.0;
-    _environment = prefs.getDouble(_kEnvironmentKey) ?? 0.0;
+    _environment = AppEnvironmentX.fromToken(prefs.getString(_kEnvironmentKey));
     _projection = prefs.getString(_kProjectionKey) ?? '70mm';
     _groundShadow = prefs.getBool(_kGroundShadowKey) ?? false;
     GpuSupport.isSupported().then((ok) {
@@ -136,7 +140,10 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
         _lightApplied = true;
         if (_lightIntensity != 1.0) _scene.setLightIntensity(_lightIntensity);
         if (_lightAngle != 0.0) _scene.setLightAngle(_lightAngle);
-        if (_environment != 0.0) _scene.setEnvironment(_environment);
+        // Apply the persisted environment (Faz C / PO #6) unconditionally: the
+        // preset re-aims/recolours the rig + sets the IBL, and None is the
+        // neutral identity, so asserting it from the saved value is safe.
+        _scene.setEnvironment(_environment);
         // Push the persisted lens preset (Faz B #9). The scene defaults to
         // '70mm', so only a non-default needs asserting over it.
         if (_projection != '70mm') _scene.setProjection(_projection);
@@ -282,6 +289,15 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
               ? const _UnsupportedGpu()
               : Stack(
         children: [
+          // Faz C / PO #6: the procedural environment backdrop, painted BEHIND
+          // the (now transparent) Thermion texture. None paints the same flat
+          // c.bg as before, so the default look is pixel-identical to today.
+          Positioned.fill(
+            child: EnvironmentBackdrop(
+              environment: _environment,
+              fallback: c.bg,
+            ),
+          ),
           Positioned.fill(
             child: ModelSceneView(
               controller: _scene,
@@ -358,10 +374,13 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
                     _scene.setLightAngle(v);
                     _saveLight();
                   },
-                  onEnvironment: (v) {
-                    _environment = v;
-                    _scene.setEnvironment(v);
+                  onEnvironment: (env) {
+                    _environment = env;
+                    _scene.setEnvironment(env);
                     _saveLight();
+                    // Repaint so the EnvironmentBackdrop layer swaps with the
+                    // newly-picked environment.
+                    setState(() {});
                   },
                 )),
           if (_tab == _Tab.info)
@@ -573,6 +592,36 @@ class _Chip extends StatelessWidget {
   }
 }
 
+/// A selectable pill (Faz C / PO #6 environment picker). Matches [_Chip]'s
+/// rounded outline, but fills when [selected] so the active environment reads
+/// at a glance (the View/Render chips are stateless actions, hence a variant).
+class _EnvChip extends StatelessWidget {
+  const _EnvChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.prism;
+    return OutlinedButton(
+      onPressed: onTap,
+      style: OutlinedButton.styleFrom(
+        foregroundColor: selected ? c.bg : c.textPrimary,
+        backgroundColor: selected ? c.textPrimary : Colors.transparent,
+        side: BorderSide(
+            color: selected ? c.textPrimary : c.borderHairline),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+      ),
+      child: Text(label),
+    );
+  }
+}
+
 class _PresetPanel extends StatelessWidget {
   const _PresetPanel({required this.onView});
   final ValueChanged<String> onView;
@@ -643,10 +692,13 @@ class _RenderPanel extends StatefulWidget {
   /// sessions). The sliders seed from these instead of resetting to defaults.
   final double intensity;
   final double angle;
-  final double environment;
+
+  /// Selected lighting environment (Faz C / PO #6) + its setter. Parent-owned
+  /// so the picked chip survives the panel rebuilding and is persisted.
+  final AppEnvironment environment;
   final ValueChanged<double> onLightIntensity;
   final ValueChanged<double> onLightAngle;
-  final ValueChanged<double> onEnvironment;
+  final ValueChanged<AppEnvironment> onEnvironment;
 
   @override
   State<_RenderPanel> createState() => _RenderPanelState();
@@ -668,7 +720,7 @@ class _RenderPanelState extends State<_RenderPanel> {
   // defaults each time this panel is rebuilt (tab switch / re-open).
   late double _intensity = widget.intensity; // light-rig multiplier
   late double _angle = widget.angle; // rig azimuth, radians
-  late double _environment = widget.environment; // IBL amount (0 = off)
+  late AppEnvironment _environment = widget.environment; // lighting environment
   late bool _groundShadow = widget.groundShadow; // contact shadow on/off
 
   void _pick(Color c) {
@@ -881,16 +933,28 @@ class _RenderPanelState extends State<_RenderPanel> {
               widget.onLightAngle(v);
             },
           ),
-          _LightSlider(
-            icon: LucideIcons.globe, // environment / reflections (IBL), 0 = off
-            tooltip: 'Environment reflections — 0 = off, right = shinier/realistic',
-            value: _environment,
-            min: 0.0,
-            max: 1.0,
-            // (Re)loads the IBL — apply on release.
-            onChanged: (v) => setState(() => _environment = v),
-            onChangeEnd: widget.onEnvironment,
-          ),
+          const SizedBox(height: 14),
+          Text('ENVIRONMENT',
+              style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  letterSpacing: 1,
+                  color: c.textMuted)),
+          const SizedBox(height: 10),
+          // Lighting environment picker (Faz C / PO #6): a flat backdrop +
+          // matching light preset. None keeps today's look.
+          Wrap(spacing: 10, children: [
+            for (final env in AppEnvironment.values)
+              _EnvChip(
+                label: env.label,
+                selected: _environment == env,
+                onTap: () {
+                  setState(() => _environment = env);
+                  widget.onEnvironment(env);
+                },
+              ),
+          ]),
+          const SizedBox(height: 14),
           // Ground/contact shadow (Faz B #4) — drops a soft shadow under the
           // model onto a catcher plane. Off by default.
           Row(children: [
