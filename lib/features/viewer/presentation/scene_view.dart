@@ -70,6 +70,15 @@ class ModelSceneController {
   /// Sets the model's base color (the surface tint the light shades).
   void setColor(Color color) => _state?._setColor(color);
 
+  /// The user's chosen base color as sRGB 0xAARRGGBB, or null when they haven't
+  /// picked one (or a texture is showing) so callers fall back to the model's
+  /// own color. Lets the AR export bake the viewer's color (Faz D / #10).
+  int? get pickedColorArgb => _state?._pickedColorArgb;
+
+  /// Current surface opacity (1.0 solid, 0.35 in x-ray), baked into the AR
+  /// export so a see-through model stays see-through in AR (Faz D / #10).
+  double get currentOpacity => _state?._currentAlpha ?? 1.0;
+
   /// Light-rig intensity multiplier (0.2–2.5; 1.0 = default brightness).
   void setLightIntensity(double factor) =>
       _state?._setLightIntensity(factor);
@@ -374,6 +383,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
 
   String _mode = 'solid';
   Color _baseColor = _kNeutral;
+  bool _colorPicked = false; // user has chosen a color (vs the neutral default)
   double _currentAlpha = 1.0; // 0.35 in x-ray
 
   /// Camera lens/projection preset (#9): '70mm' (default), '24mm', 'fisheye'
@@ -626,6 +636,11 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       ((c.r * 255).round() << 16) |
       ((c.g * 255).round() << 8) |
       (c.b * 255).round();
+
+  /// The user's picked color as sRGB 0xAARRGGBB, or null when untouched or a
+  /// texture is shown — see [ModelSceneController.pickedColorArgb].
+  int? get _pickedColorArgb =>
+      (_colorPicked && _texEncoded == null) ? _argb(_baseColor) : null;
 
   /// Builds (or rebuilds) the on-screen asset for [mode], optionally framing the
   /// camera to it (on first load / model change). Coalesces rapid mode taps.
@@ -1194,6 +1209,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
 
   Future<void> _setColor(Color color) async {
     _baseColor = color;
+    _colorPicked = true;
     // Picking a color switches the surface back to flat color (texture off) —
     // baseColorFactor and baseColorMap are mutually exclusive in the UI.
     if (_texEncoded != null) {

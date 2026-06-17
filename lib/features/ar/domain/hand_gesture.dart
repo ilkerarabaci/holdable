@@ -71,12 +71,17 @@ class Hand {
     return s <= 1e-6 ? double.infinity : d / s;
   }
 
-  /// Pinching when the thumb/index gap closes below a fraction of hand span.
-  bool get isPinching => pinchRatio < kPinchThreshold;
+  /// Pinching when the thumb/index gap closes below [kPinchEnter] of hand span.
+  bool get isPinching => pinchRatio < kPinchEnter;
 
-  /// A pinch threshold tuned for "thumb and index touching-ish". Span-relative,
-  /// so it holds whether the hand is near or far.
-  static const double kPinchThreshold = 0.55;
+  /// Pinch thresholds, span-relative so they hold whether the hand is near or
+  /// far. The two values give the grab *hysteresis*: a deliberate close
+  /// (< [kPinchEnter]) STARTS a grab, and only a clear open (>= [kPinchExit])
+  /// releases it. The gap between them stops the grab from flickering on/off
+  /// when the ratio hovers right on the edge — the main cause of a grab that
+  /// "won't hold".
+  static const double kPinchEnter = 0.50;
+  static const double kPinchExit = 0.65;
 }
 
 /// A single processed camera frame: 0, 1 or 2 detected hands.
@@ -117,18 +122,35 @@ class ModelPose {
 ///    relative to the span captured when the two-hand gesture started.
 ///  - No hands / open hand: idle, pose holds.
 ///
-/// All outputs are low-pass filtered so jittery landmark noise doesn't make the
-/// model vibrate. [smoothing] in (0,1]: 1 = instant/no smoothing.
+/// Noise is filtered in two places so the model doesn't twitch: [landmarkSmoothing]
+/// low-passes the *input* landmarks before any gesture math, and [smoothing]
+/// low-passes the *output* pose. Both in (0,1]: 1 = instant/off.
 class HandModelController {
   HandModelController({
     this.smoothing = 0.35,
+    this.landmarkSmoothing = 1.0,
     this.minScale = 0.25,
     this.maxScale = 4.0,
   });
 
+  /// Output low-pass on the pose, in (0,1]: 1 = instant (no smoothing).
   final double smoothing;
+
+  /// Input low-pass on the raw landmarks, in (0,1]: 1 = off (pass through).
+  /// The gesture math (palm, roll, pinch ratio) is built from *differences* of
+  /// landmark positions, so single-frame landmark jitter turns into a visible
+  /// twitch in the model. Filtering the landmarks *before* that math is the
+  /// cheapest way to make control feel fluid. Production uses a value < 1; the
+  /// unit tests leave it at 1 for exact, frame-precise math.
+  final double landmarkSmoothing;
+
   final double minScale;
   final double maxScale;
+
+  /// Hand-travel → model-travel gain: a full-frame palm sweep moves the model
+  /// [kTranslateGain]× the [-1,1] view range. Kept modest (was 2.0) so jitter
+  /// and arm drift don't overshoot — easier to place the model precisely.
+  static const double kTranslateGain = 1.5;
 
   final ModelPose pose = ModelPose();
 
@@ -145,17 +167,21 @@ class HandModelController {
   double _stretchSpan0 = 0; // inter-palm distance at stretch start
   double _poseScale0 = 1; // scale at stretch start
 
+  // Input landmark low-pass state: the previous (already-smoothed) hands.
+  List<Hand>? _smoothHands;
+
   bool get isGrabbing => _grabbing;
   bool get isStretching => _stretching;
 
   /// Feed one processed frame; returns the updated pose.
   ModelPose update(HandFrame frame) {
-    if (frame.isTwoHand) {
-      _updateStretch(frame.hands[0], frame.hands[1]);
+    final f = _smoothLandmarks(frame);
+    if (f.isTwoHand) {
+      _updateStretch(f.hands[0], f.hands[1]);
       _grabbing = false;
-    } else if (frame.hasHand) {
+    } else if (f.hasHand) {
       _stretching = false;
-      _updateGrab(frame.hands.first);
+      _updateGrab(f.hands.first);
     } else {
       _grabbing = false;
       _stretching = false;
@@ -163,8 +189,48 @@ class HandModelController {
     return pose;
   }
 
+  /// Exponentially smooths each landmark toward its previous position, pairing
+  /// hands by index across frames. A no-op when [landmarkSmoothing] >= 1, on an
+  /// empty frame, or on the first frame after a gap (nothing to blend yet).
+  HandFrame _smoothLandmarks(HandFrame frame) {
+    final prev = _smoothHands;
+    if (landmarkSmoothing >= 1.0 || frame.hands.isEmpty || prev == null) {
+      _smoothHands = frame.hands;
+      return frame;
+    }
+    final out = <Hand>[];
+    for (var i = 0; i < frame.hands.length; i++) {
+      final h = frame.hands[i];
+      final p =
+          (i < prev.length && prev[i].landmarks.length == h.landmarks.length)
+              ? prev[i]
+              : null;
+      out.add(p == null ? h : _lerpHand(p, h));
+    }
+    _smoothHands = out;
+    return HandFrame(out);
+  }
+
+  Hand _lerpHand(Hand prev, Hand curr) {
+    final a = landmarkSmoothing;
+    final lm = List<HandLandmark>.generate(curr.landmarks.length, (i) {
+      final p = prev.landmarks[i], c = curr.landmarks[i];
+      return HandLandmark(
+        p.x + (c.x - p.x) * a,
+        p.y + (c.y - p.y) * a,
+        p.z + (c.z - p.z) * a,
+      );
+    });
+    return Hand(lm, isRight: curr.isRight);
+  }
+
   void _updateGrab(Hand hand) {
-    if (hand.isPinching) {
+    // Hysteresis: start a grab only on a deliberate pinch (< kPinchEnter), but
+    // once grabbing, hold it until the gap clearly opens (>= kPinchExit).
+    final holding = _grabbing
+        ? hand.pinchRatio < Hand.kPinchExit
+        : hand.pinchRatio < Hand.kPinchEnter;
+    if (holding) {
       final palm = hand.palmCenter;
       if (!_grabbing) {
         // Capture the reference frame so the model doesn't jump to the hand —
@@ -181,10 +247,12 @@ class HandModelController {
       }
       final p0 = _grabPalm0!;
       // Image x grows rightward, y grows downward. View tx grows rightward,
-      // ty grows *upward*, hence the y negation. ×2 maps full-frame palm travel
-      // to the full [-1,1] view range.
-      final targetTx = (_poseTx0 + (palm.x - p0.x) * 2.0).clamp(-1.0, 1.0);
-      final targetTy = (_poseTy0 - (palm.y - p0.y) * 2.0).clamp(-1.0, 1.0);
+      // ty grows *upward*, hence the y negation. kTranslateGain maps palm
+      // travel to the [-1,1] view range.
+      final targetTx =
+          (_poseTx0 + (palm.x - p0.x) * kTranslateGain).clamp(-1.0, 1.0);
+      final targetTy =
+          (_poseTy0 - (palm.y - p0.y) * kTranslateGain).clamp(-1.0, 1.0);
       final targetYaw = _poseYaw0 + _angleDelta(_grabRoll0, hand.roll);
       // ONE-HAND scale via depth: the hand's apparent size (span) grows as it
       // moves toward the camera. So while grabbing, pull the hand closer to
@@ -239,5 +307,6 @@ class HandModelController {
       ..yaw = 0;
     _grabbing = false;
     _stretching = false;
+    _smoothHands = null;
   }
 }

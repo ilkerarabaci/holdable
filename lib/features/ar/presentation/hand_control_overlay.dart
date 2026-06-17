@@ -33,7 +33,12 @@ class HandControlOverlay extends StatefulWidget {
 
 class _HandControlOverlayState extends State<HandControlOverlay> {
   final HandLandmarkerChannel _channel = HandLandmarkerChannel();
-  final HandModelController _controller = HandModelController();
+
+  // landmarkSmoothing < 1 low-passes raw landmark jitter *before* the gesture
+  // math, so grab/rotate feel fluid instead of twitchy; the output `smoothing`
+  // default still damps the final pose.
+  final HandModelController _controller =
+      HandModelController(landmarkSmoothing: 0.7);
 
   StreamSubscription<HandFrame>? _sub;
   int? _textureId;
@@ -170,7 +175,12 @@ class _CameraPip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const w = 130.0, h = 174.0;
+    // Sized to the screen so you can actually read your hand pose — the old
+    // fixed 130×174 was too small. ~46% of the short side, clamped, keeping the
+    // original 130:174 portrait ratio.
+    final shortest = MediaQuery.sizeOf(context).shortestSide;
+    final w = (shortest * 0.46).clamp(190.0, 260.0).toDouble();
+    final h = w * 174 / 130;
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
       child: SizedBox(

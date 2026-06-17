@@ -181,6 +181,10 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     final name = await exportModelToGlb(
       filePath: _model.filePath,
       format: _model.format.fileExtension,
+      // Bake the viewer's current look into the AR model (Faz D / #10): the
+      // colour the user picked + its opacity (x-ray → see-through in AR too).
+      overrideColorArgb: _scene.pickedColorArgb,
+      opacity: _scene.currentOpacity,
     );
     if (!mounted) return;
     if (name == null) {
