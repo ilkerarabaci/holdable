@@ -64,7 +64,11 @@ const double _kContactStrength = 0.55;
 /// the silhouette — a 3-px falloff fakes a soft fringe with no blur kernel.
 const List<int> _kRimRed = [255, 90, 120];
 const List<int> _kRimBlue = [80, 150, 255];
-const List<double> _kRimFalloff = [0.50, 0.30, 0.14];
+// Strength by distance (supersampled px) from the silhouette. Widened 3→6 px
+// and strengthened (alpha.53): the rim was ~1px after downsample → invisible at
+// 256px, so the "D" redesign didn't read. This makes the chromatic edge a clear
+// ~3px band in the output without being garish.
+const List<double> _kRimFalloff = [0.85, 0.72, 0.58, 0.44, 0.30, 0.16];
 
 /// Rasterizes a flat-shaded iso thumbnail of the mesh into an RGBA byte buffer.
 ///

@@ -175,11 +175,12 @@ class _CameraPip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Sized to the screen so you can actually read your hand pose — the old
-    // fixed 130×174 was too small. ~46% of the short side, clamped, keeping the
-    // original 130:174 portrait ratio.
+    // Sized so the hand is readable but the box doesn't smother the centred
+    // model (alpha.51's ~190–260 overlapped it — device feedback). ~36% of the
+    // short side, clamped 150–185: clearly bigger than the original cramped 130,
+    // noticeably smaller than alpha.51. Keeps the 130:174 portrait ratio.
     final shortest = MediaQuery.sizeOf(context).shortestSide;
-    final w = (shortest * 0.46).clamp(190.0, 260.0).toDouble();
+    final w = (shortest * 0.36).clamp(150.0, 185.0).toDouble();
     final h = w * 174 / 130;
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),

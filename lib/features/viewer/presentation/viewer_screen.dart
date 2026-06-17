@@ -813,6 +813,28 @@ class _RenderPanelState extends State<_RenderPanel> {
                 onTap: () => widget.onMode('xray')),
           ]),
           const SizedBox(height: 14),
+          Text('ENVIRONMENT',
+              style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  letterSpacing: 1,
+                  color: c.textMuted)),
+          const SizedBox(height: 10),
+          // Lighting environment picker (Faz C / PO #6): flat backdrop + matching
+          // light preset. Placed up top — it's a primary scene control (device
+          // feedback: was buried at the panel bottom). None keeps today's look.
+          Wrap(spacing: 10, children: [
+            for (final env in AppEnvironment.values)
+              _EnvChip(
+                label: env.label,
+                selected: _environment == env,
+                onTap: () {
+                  setState(() => _environment = env);
+                  widget.onEnvironment(env);
+                },
+              ),
+          ]),
+          const SizedBox(height: 14),
           Text('LENS',
               style: TextStyle(
                   fontFamily: 'monospace',
@@ -933,27 +955,6 @@ class _RenderPanelState extends State<_RenderPanel> {
               widget.onLightAngle(v);
             },
           ),
-          const SizedBox(height: 14),
-          Text('ENVIRONMENT',
-              style: TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 11,
-                  letterSpacing: 1,
-                  color: c.textMuted)),
-          const SizedBox(height: 10),
-          // Lighting environment picker (Faz C / PO #6): a flat backdrop +
-          // matching light preset. None keeps today's look.
-          Wrap(spacing: 10, children: [
-            for (final env in AppEnvironment.values)
-              _EnvChip(
-                label: env.label,
-                selected: _environment == env,
-                onTap: () {
-                  setState(() => _environment = env);
-                  widget.onEnvironment(env);
-                },
-              ),
-          ]),
           const SizedBox(height: 14),
           // Ground/contact shadow (Faz B #4) — drops a soft shadow under the
           // model onto a catcher plane. Off by default.

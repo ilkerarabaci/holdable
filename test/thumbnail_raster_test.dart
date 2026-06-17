@@ -97,6 +97,27 @@ void main() {
     expect(tones.length, greaterThan(1));
   });
 
+  test('chromatic Prism rim — blue fringe left of the model, red fringe right',
+      () {
+    final buf = rasterCube();
+    // The "D" signature: a red chromatic fringe just off the silhouette's right
+    // edge and a blue fringe off the left. Scan for a clearly blue-biased pixel
+    // in the left half and a red-biased one in the right half (the neutral pool
+    // is ~achromatic, the lit model is ~grey, so only the rim trips these).
+    var bluishLeft = false, reddishRight = false;
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        final p = _rgb(buf, size, x, y);
+        if (x < size ~/ 2 && p.b > p.r + 12 && p.b > 28) bluishLeft = true;
+        if (x >= size ~/ 2 && p.r > p.b + 12 && p.r > 28) reddishRight = true;
+      }
+    }
+    expect(bluishLeft, isTrue,
+        reason: 'blue chromatic rim on the left silhouette edge');
+    expect(reddishRight, isTrue,
+        reason: 'red chromatic rim on the right silhouette edge');
+  });
+
   test('returns null for an empty mesh', () {
     final buf = rasterizeThumbnail(
       positions: Float32List(0),

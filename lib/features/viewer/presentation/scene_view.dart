@@ -172,6 +172,16 @@ const List<(double, double, double, double)> _kLightRig = [
   (-0.1, -0.9, 0.3, 14000),
 ];
 
+/// The colour to bake into the AR export (Faz D / #10): the user's picked colour
+/// (sRGB 0xAARRGGBB) when they've chosen one and no texture is showing, else null
+/// so the caller falls back to the model's own colour. Pure → unit-tested.
+int? arPickedColorArgb({
+  required bool colorPicked,
+  required bool hasTexture,
+  required int baseColorArgb,
+}) =>
+    (colorPicked && !hasTexture) ? baseColorArgb : null;
+
 /// A pure light-rig preset for an [AppEnvironment] (Faz C / PO #6). It nudges
 /// the directional rig to *match* the procedural backdrop the user picked, and
 /// is COMPOSED on top of the user's own intensity/azimuth sliders (it never
@@ -704,9 +714,13 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       (c.b * 255).round();
 
   /// The user's picked color as sRGB 0xAARRGGBB, or null when untouched or a
-  /// texture is shown — see [ModelSceneController.pickedColorArgb].
-  int? get _pickedColorArgb =>
-      (_colorPicked && _texEncoded == null) ? _argb(_baseColor) : null;
+  /// texture is shown — see [ModelSceneController.pickedColorArgb]. The decision
+  /// is the pure [arPickedColorArgb] so it's unit-tested.
+  int? get _pickedColorArgb => arPickedColorArgb(
+        colorPicked: _colorPicked,
+        hasTexture: _texEncoded != null,
+        baseColorArgb: _argb(_baseColor),
+      );
 
   /// Builds (or rebuilds) the on-screen asset for [mode], optionally framing the
   /// camera to it (on first load / model change). Coalesces rapid mode taps.
