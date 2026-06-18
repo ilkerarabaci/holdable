@@ -239,6 +239,42 @@ EnvLightPreset environmentLightPreset(AppEnvironment env) {
   }
 }
 
+/// Direction the ground-shadow sun should point so the cast shadow stays
+/// CONSISTENT with the lighting (#4, Efe feedback #3): the shadow must fall
+/// AWAY from the dominant key light, so the sun points along the key's own
+/// direction. We take the rig's key sun ([_kLightRig]`[0]`) and rotate it about
+/// Y by the SAME composed azimuth the rig uses (`userAzimuth + envBias`) via the
+/// same Y-rotation as [_ModelSceneViewState._rotatedDir]. Returns a normalized
+/// (x,y,z). Pure — no GPU/viewer — so the contract is unit-testable.
+({double x, double y, double z}) groundShadowSunDirection({
+  required double keyX,
+  required double keyY,
+  required double keyZ,
+  required double azimuth,
+}) {
+  final ca = math.cos(azimuth), sa = math.sin(azimuth);
+  var x = keyX * ca + keyZ * sa;
+  final y = keyY;
+  var z = -keyX * sa + keyZ * ca;
+  final len = math.sqrt(x * x + y * y + z * z);
+  if (len > 1e-12) {
+    x /= len;
+    z /= len;
+    return (x: x, y: y / len, z: z);
+  }
+  return (x: 0.0, y: -1.0, z: 0.0);
+}
+
+/// The ground-shadow sun's intensity for a user [lightIntensity] multiplier and
+/// the active environment [intensityScale] (#4): the cast shadow should respond
+/// to how bright the rig is. Clamped so a very dim/very bright rig still yields
+/// a readable contact shadow. Pure — unit-testable.
+double groundShadowSunIntensity({
+  required double lightIntensity,
+  required double envIntensityScale,
+}) =>
+    (60000 * lightIntensity * envIntensityScale).clamp(20000.0, 120000.0);
+
 /// Resolved camera projection parameters for a lens preset (#9). One of these
 /// is non-null per preset, telling [_ModelSceneViewState._applyProjection]
 /// which Filament projection call to make:
@@ -289,11 +325,22 @@ class GroundPlaneGeometry {
   final List<int> indices;
 }
 
+/// World-space Y of the model's base (AABB min-Y) after the viewer's fit
+/// transform (#4, Efe feedback #3). `_applyMode` centers the model then scales
+/// it by [fit] about the origin, so the lowest point lands at
+/// `-(sizeY/2)·fit` — NOT `-_kFitRadius` (the bounding-*sphere* radius), which
+/// floats the object above the catcher for any model that isn't a vertical
+/// stick. [modelSizeY] is the AABB height in the file's units; [fit] is the
+/// uniform fit scale `_applyMode` applies. Pure — unit-testable without a GPU.
+double groundPlaneWorldY({required double modelSizeY, required double fit}) =>
+    -(modelSizeY * 0.5) * fit;
+
 /// Builds a horizontal shadow-catcher quad sitting at [y] (the model's bottom),
 /// spanning ±[half] in x and z, with an up normal. The model is normalized so
-/// its bounding sphere has radius [_kFitRadius] about the origin, so callers
-/// pass `y = -_kFitRadius` (bottom) and `half = _kFitRadius * 4` (a generous
-/// floor for the shadow to land on). Pure — unit-tested without a GPU.
+/// its bounding sphere has radius [_kFitRadius] about the origin; callers pass
+/// the AABB-base [y] from [groundPlaneWorldY] (so the object sits ON the floor)
+/// and `half = _kFitRadius * 4` (a generous floor for the shadow to land on).
+/// Pure — unit-tested without a GPU.
 GroundPlaneGeometry buildGroundPlane({required double y, required double half}) {
   final positions = Float32List.fromList(<double>[
     -half, y, -half, // 0
@@ -692,6 +739,13 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       // texture pipeline (crash-loop protection) — the model still opens plain.
       _texEncoded = _texCrashStep == null ? prepared.textureBytes : null;
       if (_viewerReady) await _applyMode(_mode, frame: true);
+      // If the ground shadow is on and the model changed in place, re-base the
+      // shadow-catcher at the NEW model's bottom (its sizeY differs). Reuses the
+      // same guarded enable/disable path — best-effort, no new crash surface.
+      if (_groundShadow && _viewerReady) {
+        await _disableGroundShadow();
+        await _enableGroundShadow();
+      }
       if (staleTex != null) {
         try {
           await staleTex.destroy();
@@ -1174,25 +1228,34 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     }
   }
 
-  /// Turns shadows on, adds a dedicated overhead castShadows sun (kept out of
-  /// [_lights]) and lays a shadow-catcher quad just under the model.
+  /// Turns shadows on, adds a dedicated castShadows sun aimed to match the
+  /// lighting (kept out of [_lights]) and lays a shadow-catcher quad at the
+  /// model's BASE so the object visibly sits ON the floor (Efe feedback #3).
   Future<void> _enableGroundShadow() async {
     final viewer = _viewer;
     if (viewer == null) return;
     try {
       await viewer.setShadowsEnabled(true);
-      // One overhead sun aimed almost straight down so the shadow falls neatly
-      // under the model. Kept OUT of _lights so _setLightIntensity's
-      // remove/re-add loop can't drop it.
-      _shadowLight ??= await viewer.addDirectLight(DirectLight.sun(
-        direction: Vector3(0.2, -1.0, 0.1)..normalize(),
-        intensity: 60000,
-        castShadows: true,
-      ));
+      // Dedicated shadow sun, aimed along the dominant key light so the cast
+      // shadow falls AWAY from it (consistent with the rig + environment), at an
+      // intensity that tracks the user's brightness. Kept OUT of _lights so
+      // _setLightIntensity's remove/re-add loop can't drop it.
+      await _aimShadowLight();
       if (_groundPlane == null) {
-        // Quad at the model's bottom (model is normalized to _kFitRadius about
-        // the origin, so bottom ≈ y = -_kFitRadius), spanning a generous floor.
-        final g = buildGroundPlane(y: -_kFitRadius, half: _kFitRadius * 4);
+        // Quad at the model's AABB base in world space — the model is centered
+        // then scaled by `fit` about the origin, so its lowest point is at
+        // -(sizeY/2)·fit (NOT -_kFitRadius, the bounding-sphere radius, which
+        // would float the object). Spans a generous floor for the shadow.
+        final p = _model;
+        final double groundY;
+        if (p != null && p.camDistance > 1e-9) {
+          final modelRadius = p.camDistance / 3.0;
+          final fit = modelRadius > 1e-9 ? _kFitRadius / modelRadius : 1.0;
+          groundY = groundPlaneWorldY(modelSizeY: p.sizeY, fit: fit);
+        } else {
+          groundY = -_kFitRadius; // no model yet — fall back to the old place
+        }
+        final g = buildGroundPlane(y: groundY, half: _kFitRadius * 4);
         final geometry = Geometry(
           g.positions,
           g.indices,
@@ -1243,6 +1306,41 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       if (light != null) await viewer.removeLight(light);
       await viewer.setShadowsEnabled(false);
     } catch (_) {/* best-effort teardown */}
+  }
+
+  /// (Re)creates the ground-shadow sun so the cast shadow stays CONSISTENT with
+  /// the lighting (Efe feedback #3): it points along the dominant key light
+  /// ([_kLightRig]`[0]`) rotated by the SAME composed azimuth the rig uses
+  /// (`_lightAzimuth + _envPreset.azimuthBias`) — so the shadow falls away from
+  /// the key — and its intensity tracks `_lightIntensity` (× the env scale).
+  ///
+  /// Thermion has no runtime intensity setter (see [_rebuildRig]), so changing
+  /// brightness means remove + re-add; the direction folds in on the same pass.
+  /// No-op (and does not re-enable) when the shadow is off. Best-effort: a GPU
+  /// reject leaves the previous shadow sun (or none) in place — never crashes.
+  Future<void> _aimShadowLight() async {
+    final viewer = _viewer;
+    if (viewer == null || !_groundShadow) return;
+    try {
+      final old = _shadowLight;
+      _shadowLight = null;
+      if (old != null) await viewer.removeLight(old);
+      final (kx, ky, kz, _) = _kLightRig[0];
+      final dir = groundShadowSunDirection(
+        keyX: kx,
+        keyY: ky,
+        keyZ: kz,
+        azimuth: _lightAzimuth + _envPreset.azimuthBias,
+      );
+      _shadowLight = await viewer.addDirectLight(DirectLight.sun(
+        direction: Vector3(dir.x, dir.y, dir.z),
+        intensity: groundShadowSunIntensity(
+          lightIntensity: _lightIntensity,
+          envIntensityScale: _envPreset.intensityScale,
+        ),
+        castShadows: true,
+      ));
+    } catch (_) {/* keep whatever shadow sun (or none) we had */}
   }
 
   /// Drives the framing from a hand-gesture pose (F4). Maps the controller's
@@ -1323,7 +1421,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     _envPreset = environmentLightPreset(env);
     try {
       // Re-apply the rig with the new preset (rebuild bakes the intensity scale
-      // + colour temperature; the re-aim folds in the azimuth bias).
+      // + colour temperature; the re-aim folds in the azimuth bias). The
+      // _setLightAzimuth call also re-aims the ground-shadow sun for the new
+      // preset (consistent shadow direction/strength — no-op if shadow off).
       await _rebuildRig();
       await _setLightAzimuth(_lightAzimuth);
       // IBL keyed off the preset's amount (was the old 0..1 slider). loadIbl
@@ -1356,6 +1456,8 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       await v.setLightDirection(
           _lights[i], _rotatedDir(x, y, z, az + _envPreset.azimuthBias));
     }
+    // Keep the cast shadow consistent with the relit rig (no-op if shadow off).
+    await _aimShadowLight();
   }
 
   /// Re-creates the rig at a new intensity multiplier (Thermion has no runtime
@@ -1363,6 +1465,8 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   Future<void> _setLightIntensity(double factor) async {
     _lightIntensity = factor.clamp(0.2, 2.5);
     await _rebuildRig();
+    // Scale the cast shadow's strength with the rig (no-op if shadow off).
+    await _aimShadowLight();
   }
 
   /// Remove + re-add the six-sun rig at the CURRENT user intensity/azimuth
@@ -1681,6 +1785,7 @@ class _PreparedModel {
     required this.centerX,
     required this.centerY,
     required this.centerZ,
+    required this.sizeY,
     required this.camDistance,
     required this.parseMs,
     this.thumbnailRgba,
@@ -1709,6 +1814,10 @@ class _PreparedModel {
   final int vertexCount;
   final int triangleCount;
   final double centerX, centerY, centerZ;
+
+  /// AABB height (maxY − minY) in the file's units. Used to drop the ground
+  /// shadow-catcher at the model's base in world space (see [groundPlaneWorldY]).
+  final double sizeY;
   final double camDistance;
   final int parseMs;
 
@@ -1845,6 +1954,7 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
     centerX: b.centerX,
     centerY: b.centerY,
     centerZ: b.centerZ,
+    sizeY: b.sizeY,
     camDistance: camDistance,
     parseMs: sw.elapsedMilliseconds,
     thumbnailRgba: thumb,

@@ -180,8 +180,37 @@ class _ViewerScreenState extends ConsumerState<ViewerScreen> {
     } catch (_) {/* best-effort */}
   }
 
+  /// Vertex count above which AR is warned to run hot / drain the battery
+  /// (PO #2 overheating). A soft guard — the user can still proceed.
+  static const _kArHeavyVertThreshold = 250000;
+
   /// Exports the current model to a temp GLB and opens the AR placement screen.
   Future<void> _openAr() async {
+    // Heavy-model guard: a very dense mesh makes the AR session run hot and
+    // drain battery. Warn (don't block) before launching; below the threshold
+    // (or if the count is unknown) behave exactly as before.
+    final verts = _status.verts;
+    if (verts != null && verts > _kArHeavyVertThreshold) {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Heavy model'),
+          content: const Text(
+              'This model is very detailed; AR may run hot / drain battery.'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancel')),
+            TextButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Continue')),
+          ],
+        ),
+      );
+      if (proceed != true) return;
+      if (!mounted) return;
+    }
+
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     messenger.showSnackBar(const SnackBar(content: Text('Preparing AR…')));

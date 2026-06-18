@@ -42,7 +42,8 @@ class ArViewScreen extends StatefulWidget {
   State<ArViewScreen> createState() => _ArViewScreenState();
 }
 
-class _ArViewScreenState extends State<ArViewScreen> {
+class _ArViewScreenState extends State<ArViewScreen>
+    with WidgetsBindingObserver {
   ARSessionManager? _sessionManager;
   ARObjectManager? _objectManager;
   ARAnchorManager? _anchorManager;
@@ -57,6 +58,32 @@ class _ArViewScreenState extends State<ArViewScreen> {
   // go on the node (passing one corrupts the scale: m00 = scale·cos(yaw), which
   // is why rotating "resized" the model). Instead we apply scale on the node and
   // ROTATE THE ANCHOR (the node inherits the anchor's pose) — see _rebuildPlacement.
+
+  @override
+  void initState() {
+    super.initState();
+    // Watch app lifecycle so we can pause the AR session when backgrounded —
+    // a running ARCore/ARKit session is a major heat/battery source even with
+    // the app off-screen (PO #2 overheating).
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  /// Pause the camera + AR tracking when the app leaves the foreground and
+  /// resume it on return. The plugin's disableCamera()/enableCamera() map to
+  /// the native session.pause()/resume(), which also stops per-frame tracking.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+        _sessionManager?.disableCamera();
+      case AppLifecycleState.resumed:
+        _sessionManager?.enableCamera();
+      case AppLifecycleState.detached:
+        break;
+    }
+  }
 
   ARNode _makeNode() => ARNode(
         type: NodeType.fileSystemAppFolderGLB,
@@ -94,6 +121,7 @@ class _ArViewScreenState extends State<ArViewScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _sessionManager?.dispose();
     super.dispose();
   }
@@ -137,6 +165,10 @@ class _ArViewScreenState extends State<ArViewScreen> {
       _baseTransform = hit.worldTransform;
       final ok = await _rebuildPlacement();
       if (ok && mounted) {
+        // Stop finding/drawing planes once the model is placed: the plane
+        // renderer runs continuously and is a steady heat source (PO #2). It's
+        // turned back on in _reset() so the user can re-place.
+        _sessionManager?.showPlanes(false);
         setState(() => _placed = true);
       } else if (mounted) {
         _toast("Couldn't place the model here.");
@@ -175,6 +207,9 @@ class _ArViewScreenState extends State<ArViewScreen> {
     if (_anchor != null) anchors?.removeAnchor(_anchor!);
     _node = null;
     _anchor = null;
+    // Re-enable plane finding/drawing so the user can pick a new spot (we
+    // switched it off after the previous placement to save heat/battery).
+    _sessionManager?.showPlanes(true);
     setState(() => _placed = false);
   }
 
