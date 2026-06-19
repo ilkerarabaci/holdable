@@ -149,8 +149,9 @@ class ImportService {
           _baseName(displayName ?? path.split(Platform.pathSeparator).last);
       final bytes = source.lengthSync();
       // Above the async ceiling we still refuse (don't burn upload data on an
-      // absurd file). Otherwise: ≤ the sync cap converts in-request; anything
-      // larger converts in a Cloud Run Job — no more hard 200 MB wall.
+      // absurd file). Otherwise: small, fast-converting files go in-request;
+      // anything over the sync cap — OR an export-bound format like .blend that
+      // times out the sync request at any size — converts in a Cloud Run Job.
       if (bytes > kMaxAsyncUploadBytes) {
         final mb = (bytes / (1024 * 1024)).round();
         final cap = kMaxAsyncUploadBytes ~/ (1024 * 1024);
@@ -158,7 +159,8 @@ class ImportService {
             message: 'This file is ${mb}MB. The limit is ${cap}MB.');
       }
       const svc = ConversionService();
-      final glb = bytes > kSyncConvertMax
+      final glb = conversionNeedsAsyncJob(
+              bytes: bytes, ext: ext, syncMaxBytes: kSyncConvertMax)
           ? await (() async {
               // Big file → async Job. Stream the upload, poll, then download the
               // mobile-fit glb the Job produced.
