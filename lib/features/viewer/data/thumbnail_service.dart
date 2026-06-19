@@ -20,11 +20,17 @@ import 'thumbnail_raster.dart';
 
 /// Version-stamped thumbnail file suffix. Bump the token when the rasterizer's
 /// output changes so old thumbnails are detected as stale and regenerated.
-const String kThumbnailVersionSuffix = '.t4.png';
+const String kThumbnailVersionSuffix = '.t5.png';
 
 const int _kSize = 256;
-const double _kAzimuth = math.pi / 4; // matches the viewer's default iso camera
-const double _kElevation = 0.6;
+// Uniform library framing (PO feedback #1): object FRONT, slightly tilted up.
+// azimuth ~0 ⇒ the model faces the camera head-on (was π/4 3/4-iso); a modest
+// elevation puts the camera a touch above so the top reads (was 0.6, a steep
+// iso). Bumping kThumbnailVersionSuffix above forces every old render to
+// regenerate with this view (which also clears the stale light/dark mix).
+// Public so the framing contract is unit-testable (test/thumbnail_framing_test).
+const double kThumbnailAzimuth = 0.0;
+const double kThumbnailElevation = 0.30;
 const int _kBgColor = 0xFF0E0E10; // Prism dark bg (viewer background)
 const int _kSurfaceColor = 0xFFD1D1DB; // neutral model surface
 
@@ -69,8 +75,8 @@ Uint8List? _rasterEntry(_ThumbRequest req) {
     maxX: b.maxX,
     maxY: b.maxY,
     maxZ: b.maxZ,
-    azimuth: _kAzimuth,
-    elevation: _kElevation,
+    azimuth: kThumbnailAzimuth,
+    elevation: kThumbnailElevation,
     size: _kSize,
     bgColor: _kBgColor,
     surfaceColor: _kSurfaceColor,
