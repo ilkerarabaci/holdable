@@ -573,6 +573,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   bool _groundShadow = false;
   ThermionEntity? _shadowLight; // overhead sun that casts the shadow
   ThermionAsset? _groundPlane; // shadow-catcher quad asset
+  MaterialInstance? _groundMaterial; // its material — must be destroyed with it
   bool _rebuilding = false;
   String? _pendingMode; // latest mode requested while a rebuild was in flight
 
@@ -792,10 +793,25 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       if (frame) widget.onStatus(const ModelSceneStatus(loading: true));
 
       final old = _asset;
+      final oldMaterial = _material;
       if (old != null) {
         await viewer.destroyAsset(old);
         _asset = null;
         _material = null;
+      }
+      // destroyAsset frees the asset's vertex/index buffers but NOT the borrowed
+      // MaterialInstance (verified in Thermion's native GeometrySceneAsset
+      // destructor — it never touches _materialInstances). Without this destroy,
+      // every model load AND every render-mode / shading / texture / colour
+      // rebuild orphaned a MaterialInstance in GPU memory — they accumulated for
+      // the whole session (the device GRAPHICS bucket climbed and never dropped
+      // on switch: a cube loaded after heavy models read 358 MB). Destroy AFTER
+      // destroyAsset so it's no longer bound to a live renderable. The shared
+      // ubershader archive material is untouched, so there is no double-free.
+      if (oldMaterial != null) {
+        try {
+          await oldMaterial.destroy();
+        } catch (_) {/* best-effort */}
       }
 
       final bool wireframe = mode == 'wireframe';
@@ -1285,6 +1301,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
           releaseSourceData: true,
         );
         _groundPlane = plane;
+        _groundMaterial = material;
         await viewer.addToScene(plane);
       }
     } catch (_) {
@@ -1299,8 +1316,18 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     if (viewer == null) return;
     try {
       final plane = _groundPlane;
+      final planeMat = _groundMaterial;
       _groundPlane = null;
+      _groundMaterial = null;
       if (plane != null) await viewer.destroyAsset(plane);
+      // Free the catcher's MaterialInstance too (destroyAsset doesn't) — same
+      // leak as the model path; otherwise each shadow toggle / model switch with
+      // shadow on orphans one.
+      if (planeMat != null) {
+        try {
+          await planeMat.destroy();
+        } catch (_) {/* best-effort */}
+      }
       final light = _shadowLight;
       _shadowLight = null;
       if (light != null) await viewer.removeLight(light);
