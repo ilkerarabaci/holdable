@@ -33,10 +33,14 @@ migrate_working_dir/
 /build/
 /coverage/
 
-# Physical version-APK copies kept locally for on-device comparison/rollback.
-# The canonical artifacts live on GitHub Releases — don't bloat git history with
-# 100 MB binaries. The folder's README is tracked; the APKs are not.
-/dist/*.apk
+# Local scratch: downloaded APK/profile dirs (_dl_*), conversion artifacts, big
+# .blend fixtures, screenshots, notes — many GB, never belongs in git. Canonical
+# APKs live on GitHub Releases. Keep only the folder's README (already tracked).
+/dist/*
+!/dist/README.md
+
+# Parked HDRI source envs for #7 (per-mood IBL) — large, regenerable via cmgen.
+/env_src/
 
 # Symbolication related
 app.*.symbols
