@@ -968,9 +968,12 @@ class _RenderPanelState extends State<_RenderPanel> {
             value: _intensity,
             min: 0.2,
             max: 2.5,
-            // Re-creates the rig — apply on release to avoid flicker mid-drag.
-            onChanged: (v) => setState(() => _intensity = v),
-            onChangeEnd: widget.onLightIntensity,
+            // Cheap now (LightManager.setIntensity in place, no rig rebuild) —
+            // drive live like the angle slider so dragging shows immediately.
+            onChanged: (v) {
+              setState(() => _intensity = v);
+              widget.onLightIntensity(v);
+            },
           ),
           _LightSlider(
             icon: LucideIcons.compass,
