@@ -174,6 +174,14 @@ class ModelSceneView extends StatefulWidget {
 /// Default model surface color until the user picks one (a light neutral).
 const Color _kNeutral = Color(0xFFD1D1DB);
 
+/// Render the 3D viewport at this fraction of the device pixel ratio. Filament's
+/// full-resolution HDR render targets (color RGBA16F + depth + bloom mips + FXAA)
+/// dominate GPU memory and scale ~quadratically with resolution, so on an ultra-
+/// dense phone panel 0.75 (~56% of the pixels) is a real memory cut that's barely
+/// perceptible. Input stays in LOGICAL space (the viewer's own GestureDetector),
+/// so orbit/zoom/pivot-picking are unaffected by the lower render resolution.
+const double _kViewportRenderScale = 0.75;
+
 /// The base 6-sun rig (dir x,y,z, intensity): a key + two fills + three dim
 /// counter-lights so every facet catches some light without an IBL. The user's
 /// intensity multiplier + azimuth rotation are applied on top (see _setLight*).
@@ -939,7 +947,11 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       final asset = await viewer.createGeometry(
         geometry,
         materialInstances: [material],
-        releaseSourceData: false, // keep buffers for other render modes
+        // _applyMode rebuilds the Geometry from _model on EVERY mode switch, so
+        // Filament's retained CPU-side source copy was never actually reused — it
+        // just piled up as a per-model high-water in the NATIVE/Unknown bucket
+        // (~139 MB after a heavy model). Release it; the GPU buffers are unaffected.
+        releaseSourceData: true,
       );
       _asset = asset;
       _material = material;
@@ -1861,7 +1873,17 @@ class _ModelSceneViewState extends State<ModelSceneView> {
           // finger (#8). onDoubleTapDown carries the tap position; onScale*
           // keeps handling orbit/zoom/pan as before.
           onDoubleTapDown: (d) => _pickPivot(d.localPosition),
-          child: ThermionWidget(viewer: viewer),
+          // Render the Filament viewport at a reduced device-pixel-ratio (see
+          // _kViewportRenderScale) so its HDR render targets — the dominant GPU
+          // cost — shrink ~quadratically. The GestureDetector above works in
+          // logical space, so orbit/zoom/pivot are unaffected.
+          child: MediaQuery(
+            data: MediaQuery.of(context).copyWith(
+              devicePixelRatio: MediaQuery.of(context).devicePixelRatio *
+                  _kViewportRenderScale,
+            ),
+            child: ThermionWidget(viewer: viewer),
+          ),
         );
       },
     );
