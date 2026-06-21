@@ -63,7 +63,7 @@ class ConversionException implements Exception {
 /// A user-readable message for a non-200 from the conversion service. 504 means
 /// the conversion ran past the time limit — almost always a very heavy scene;
 /// point the user at exporting a glb themselves rather than retrying forever.
-ConversionException _httpError(int code) {
+ConversionException conversionHttpError(int code) {
   if (code == 504) {
     return ConversionException(
         'This model is too complex to convert automatically. In your 3D app, '
@@ -76,6 +76,23 @@ ConversionException _httpError(int code) {
   }
   return ConversionException('Conversion failed (HTTP $code).');
 }
+
+ConversionException _httpError(int code) => conversionHttpError(code);
+
+/// True iff [bytes] begins with the binary-glTF magic ("glTF" = 0x67 0x6C 0x54
+/// 0x46). Rejects HTML error pages / empty bodies a misbehaving endpoint might
+/// return in place of a model. Pure, so it's unit-tested.
+bool isValidGlb(Uint8List bytes) =>
+    bytes.length >= 4 &&
+    bytes[0] == 0x67 &&
+    bytes[1] == 0x6C &&
+    bytes[2] == 0x54 &&
+    bytes[3] == 0x46;
+
+/// Whether a [bytes]-byte payload is too large for the direct /convert POST
+/// (Cloud Run's ~32 MiB ingress cap) and must use the GCS upload path instead.
+/// Mirrors the boundary in [ConversionService.convertToGlb].
+bool conversionUsesGcsUpload({required int bytes}) => bytes > _kDirectPostMax;
 
 /// State of an async (over-the-sync-cap) conversion job, polled from
 /// `GET /jobs/<id>`. Big files convert in a Cloud Run Job, not in-request.
@@ -106,10 +123,10 @@ class ConversionService {
 
   Future<Uint8List> convertToGlb(Uint8List bytes, String ext) async {
     final e = ext.toLowerCase().replaceAll('.', '');
-    if (bytes.length <= _kDirectPostMax) {
-      return _convertDirect(bytes, e);
+    if (conversionUsesGcsUpload(bytes: bytes.length)) {
+      return _convertViaGcs(bytes, e);
     }
-    return _convertViaGcs(bytes, e);
+    return _convertDirect(bytes, e);
   }
 
   // --- Async path (>200 MB): convert in a Cloud Run Job, poll for the result. ---
@@ -310,11 +327,7 @@ class ConversionService {
 
   /// A valid GLB starts with the "glTF" magic.
   Uint8List _validateGlb(Uint8List out) {
-    if (out.length < 4 ||
-        out[0] != 0x67 ||
-        out[1] != 0x6C ||
-        out[2] != 0x54 ||
-        out[3] != 0x46) {
+    if (!isValidGlb(out)) {
       throw ConversionException('Conversion returned an invalid model.');
     }
     return out;
