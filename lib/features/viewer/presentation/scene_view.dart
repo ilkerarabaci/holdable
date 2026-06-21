@@ -1970,6 +1970,151 @@ class _PreparedModel {
 
 /// Isolate entry: read + parse, then split the interleaved buffer into the
 /// separate position/normal/uv buffers Filament's geometry builder expects.
+/// Triangle budget for on-device decimation (big-model memory). A mesh over this
+/// is grid-cluster collapsed in the parse isolate so its geometry can't pin
+/// hundreds of MB of Float32Lists in the Dart heap — a 1.3M-tri model held
+/// ~316 MB in the "Unknown"/Dart bucket, the dominant cost when a big model is
+/// open. Source-agnostic: bounds RAW big GLBs too, not just server-converted
+/// .blends. Tunable; ~350k keeps a heavy model's geometry to ~tens of MB.
+const int _kMaxTriangles = 350000;
+
+/// Reduced mesh from [_decimateMesh].
+class _DecimatedMesh {
+  _DecimatedMesh(this.positions, this.normals, this.uvs, this.indices,
+      this.vertexCount, this.triangleCount);
+  final Float32List positions;
+  final Float32List normals;
+  final Float32List uvs;
+  final List<int> indices;
+  final int vertexCount;
+  final int triangleCount;
+}
+
+/// Grid vertex-clustering decimation: snaps every vertex into a uniform grid over
+/// the model AABB, collapses each occupied cell to one AVERAGED vertex, and
+/// rebuilds the triangle list (a triangle whose 3 corners don't land in 3 distinct
+/// cells is degenerate and dropped). O(n), no deps, runs in the parse isolate. The
+/// output is bounded by the occupied-cell count, so memory is capped regardless of
+/// the source mesh size. Not QEM-quality, but it preserves the silhouette and —
+/// the point here — never lets the Dart heap hold more than the budget. The grid
+/// is sized so a surface (~R² occupied cells) lands near [targetTriangles].
+_DecimatedMesh _decimateMesh(
+  Float32List positions,
+  Float32List normals,
+  Float32List uvs,
+  List<int> indices,
+  int triangleCount,
+  double minX,
+  double minY,
+  double minZ,
+  double sizeX,
+  double sizeY,
+  double sizeZ,
+  int targetTriangles,
+) {
+  var grid = math.sqrt(targetTriangles / 2).ceil();
+  if (grid < 8) grid = 8;
+  if (grid > 1024) grid = 1024;
+  final gR = grid.toDouble();
+  final ex = sizeX > 1e-9 ? sizeX : 1e-9;
+  final ey = sizeY > 1e-9 ? sizeY : 1e-9;
+  final ez = sizeZ > 1e-9 ? sizeZ : 1e-9;
+  final n = positions.length ~/ 3;
+
+  final cellToNew = <int, int>{}; // grid cell key → new vertex index
+  final oldToNew = Int32List(n);
+  final sumPx = <double>[], sumPy = <double>[], sumPz = <double>[];
+  final sumNx = <double>[], sumNy = <double>[], sumNz = <double>[];
+  final sumU = <double>[], sumV = <double>[];
+  final count = <int>[];
+
+  for (var i = 0; i < n; i++) {
+    var gx = (((positions[i * 3] - minX) / ex) * gR).floor();
+    var gy = (((positions[i * 3 + 1] - minY) / ey) * gR).floor();
+    var gz = (((positions[i * 3 + 2] - minZ) / ez) * gR).floor();
+    if (gx < 0) {
+      gx = 0;
+    } else if (gx >= grid) {
+      gx = grid - 1;
+    }
+    if (gy < 0) {
+      gy = 0;
+    } else if (gy >= grid) {
+      gy = grid - 1;
+    }
+    if (gz < 0) {
+      gz = 0;
+    } else if (gz >= grid) {
+      gz = grid - 1;
+    }
+    final key = gx + gy * grid + gz * grid * grid;
+    var ni = cellToNew[key];
+    if (ni == null) {
+      ni = count.length;
+      cellToNew[key] = ni;
+      sumPx.add(0);
+      sumPy.add(0);
+      sumPz.add(0);
+      sumNx.add(0);
+      sumNy.add(0);
+      sumNz.add(0);
+      sumU.add(0);
+      sumV.add(0);
+      count.add(0);
+    }
+    oldToNew[i] = ni;
+    sumPx[ni] += positions[i * 3];
+    sumPy[ni] += positions[i * 3 + 1];
+    sumPz[ni] += positions[i * 3 + 2];
+    sumNx[ni] += normals[i * 3];
+    sumNy[ni] += normals[i * 3 + 1];
+    sumNz[ni] += normals[i * 3 + 2];
+    sumU[ni] += uvs[i * 2];
+    sumV[ni] += uvs[i * 2 + 1];
+    count[ni]++;
+  }
+
+  final nv = count.length;
+  final newPos = Float32List(nv * 3);
+  final newNrm = Float32List(nv * 3);
+  final newUv = Float32List(nv * 2);
+  for (var j = 0; j < nv; j++) {
+    final c = count[j].toDouble();
+    newPos[j * 3] = sumPx[j] / c;
+    newPos[j * 3 + 1] = sumPy[j] / c;
+    newPos[j * 3 + 2] = sumPz[j] / c;
+    var nx = sumNx[j], ny = sumNy[j], nz = sumNz[j];
+    final nl = math.sqrt(nx * nx + ny * ny + nz * nz);
+    if (nl > 1e-9) {
+      nx /= nl;
+      ny /= nl;
+      nz /= nl;
+    }
+    newNrm[j * 3] = nx;
+    newNrm[j * 3 + 1] = ny;
+    newNrm[j * 3 + 2] = nz;
+    newUv[j * 2] = sumU[j] / c;
+    newUv[j * 2 + 1] = sumV[j] / c;
+  }
+
+  final tris = math.min(triangleCount, indices.length ~/ 3);
+  final newIdx = <int>[];
+  for (var t = 0; t < tris; t++) {
+    final a = oldToNew[indices[t * 3]];
+    final b = oldToNew[indices[t * 3 + 1]];
+    final c = oldToNew[indices[t * 3 + 2]];
+    if (a != b && b != c && a != c) {
+      newIdx
+        ..add(a)
+        ..add(b)
+        ..add(c);
+    }
+  }
+  final List<int> idx =
+      nv <= 0x10000 ? Uint16List.fromList(newIdx) : Uint32List.fromList(newIdx);
+  return _DecimatedMesh(newPos, newNrm, newUv, idx, nv, newIdx.length ~/ 3);
+}
+
 _PreparedModel _prepareModelEntry(_ParseRequest req) {
   final bytes = File(req.path).readAsBytesSync();
   final sw = Stopwatch()..start();
@@ -2058,15 +2203,40 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
       math.sqrt(b.sizeX * b.sizeX + b.sizeY * b.sizeY + b.sizeZ * b.sizeZ);
   final camDistance = radius <= 0 ? 5.0 : radius * 3.0;
 
+  // On-device decimation (big-model memory): collapse an over-budget mesh right
+  // here in the parse isolate so its geometry can't pin hundreds of MB of Dart
+  // Float32Lists once it's open. Source-agnostic — bounds a RAW big GLB too, not
+  // just server-converted .blends. Everything downstream (thumbnail + the returned
+  // model) uses the reduced arrays; the originals become unreferenced and GC.
+  var dPositions = positions;
+  var dNormals = normals;
+  var dUvs = uvs;
+  var dIndices = indices;
+  var dIndexType = indexType;
+  var dVertexCount = n;
+  var dTriCount = mesh.triangleCount;
+  if (mesh.triangleCount > _kMaxTriangles) {
+    final dec = _decimateMesh(positions, normals, uvs, indices,
+        mesh.triangleCount, b.minX, b.minY, b.minZ, b.sizeX, b.sizeY, b.sizeZ,
+        _kMaxTriangles);
+    dPositions = dec.positions;
+    dNormals = dec.normals;
+    dUvs = dec.uvs;
+    dIndices = dec.indices;
+    dVertexCount = dec.vertexCount;
+    dTriCount = dec.triangleCount;
+    dIndexType = dVertexCount <= 0x10000 ? IndexType.USHORT : IndexType.UINT;
+  }
+
   // Rasterize the library thumbnail here in the parse isolate (CPU only — never
   // touches Filament's GPU render thread, which is why Thermion's capture()
   // crashed on device). Only the small RGBA buffer crosses back to the UI thread.
   Uint8List? thumb;
   if (req.thumbSize > 0) {
     thumb = rasterizeThumbnail(
-      positions: positions,
-      indices: indices,
-      triangleCount: mesh.triangleCount,
+      positions: dPositions,
+      indices: dIndices,
+      triangleCount: dTriCount,
       centerX: b.centerX,
       centerY: b.centerY,
       centerZ: b.centerZ,
@@ -2085,13 +2255,13 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
   }
 
   return _PreparedModel(
-    positions: positions,
-    normals: normals,
-    uvs: uvs,
-    indices: indices,
-    indexType: indexType,
-    vertexCount: n,
-    triangleCount: mesh.triangleCount,
+    positions: dPositions,
+    normals: dNormals,
+    uvs: dUvs,
+    indices: dIndices,
+    indexType: dIndexType,
+    vertexCount: dVertexCount,
+    triangleCount: dTriCount,
     centerX: b.centerX,
     centerY: b.centerY,
     centerZ: b.centerZ,
