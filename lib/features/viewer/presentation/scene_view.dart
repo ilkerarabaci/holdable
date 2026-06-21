@@ -1778,7 +1778,26 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     Texture? tex;
     try {
       _trace('decodeImage');
-      final codec = await ui.instantiateImageCodec(encoded);
+      // Cap the decoded texture resolution (big-model GPU memory): a 4K base-color
+      // texture is ~64 MB on the GPU (~85 with mips); decoding to ≤2K cuts it to
+      // ~16 MB. Read the size via ImageDescriptor (no full decode), then decode
+      // scaled — so a huge embedded texture never inflates GPU OR the decode buffer.
+      const maxTexDim = 2048;
+      final buffer = await ui.ImmutableBuffer.fromUint8List(encoded);
+      final descriptor = await ui.ImageDescriptor.encoded(buffer);
+      final ow = descriptor.width, oh = descriptor.height;
+      final maxDim = ow > oh ? ow : oh;
+      final ui.Codec codec;
+      if (maxDim > maxTexDim && maxDim > 0) {
+        final s = maxTexDim / maxDim;
+        codec = await descriptor.instantiateCodec(
+          targetWidth: (ow * s).round().clamp(1, maxTexDim),
+          targetHeight: (oh * s).round().clamp(1, maxTexDim),
+        );
+      } else {
+        codec = await descriptor.instantiateCodec();
+      }
+      descriptor.dispose();
       final frame = await codec.getNextFrame();
       final uiImage = frame.image;
       final w = uiImage.width;
