@@ -23,7 +23,11 @@ import 'threemf_parser.dart';
 ///
 /// Vertex colors are always opaque white so the material's `baseColorFactor`
 /// drives the rendered color (UnlitMaterial multiplies the two).
-const int kFloatsPerVertex = 12;
+// position(3) + normal(3) + uv(2). The old per-vertex RGBA channel was always
+// constant white and nothing read it (the material multiplies by baseColorFactor,
+// and the de-interleave only takes offsets 0-7) — dropped to shrink the transient
+// parse buffer by 1/3 (a load-peak / OOM-on-import win for big meshes).
+const int kFloatsPerVertex = 8;
 
 /// Axis-aligned bounding box of a parsed mesh, used to frame the camera.
 class ModelBounds {
@@ -545,10 +549,6 @@ class ModelParser {
     out[w + 5] = nz;
     out[w + 6] = u;
     out[w + 7] = v;
-    out[w + 8] = 1; // r
-    out[w + 9] = 1; // g
-    out[w + 10] = 1; // b
-    out[w + 11] = 1; // a
     return w + kFloatsPerVertex;
   }
 
