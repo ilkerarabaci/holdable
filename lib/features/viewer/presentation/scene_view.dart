@@ -26,6 +26,11 @@ import 'package:thermion_dart/src/filament/src/implementation/ffi_indirect_light
 
 import '../data/model_parser.dart';
 import '../data/thumbnail_raster.dart';
+// Single source of truth for the library thumbnail framing. The viewer's in-
+// place thumbnail (_load below) MUST use these, not the viewer-camera iso angle —
+// otherwise opening a model bakes a different framing than the standalone
+// thumbnail service and the library goes inconsistent (the alpha.54 regression).
+import '../data/thumbnail_service.dart' show kThumbnailAzimuth, kThumbnailElevation;
 import 'environment_backdrop.dart';
 
 /// Status pushed up to the host screen (drives the loading spinner + Info panel).
@@ -743,8 +748,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
           widget.filePath,
           widget.format,
           thumbSize: _thumbSize,
-          thumbAzimuth: _isoAzimuth,
-          thumbElevation: _isoElevation,
+          // Thumbnail framing is the library's, NOT the viewer camera's iso —
+          // one source of truth (kThumbnail*) so every model is framed uniformly.
+          thumbAzimuth: kThumbnailAzimuth,
+          thumbElevation: kThumbnailElevation,
           thumbBgColor: _argb(widget.background),
           thumbSurfaceColor: _argb(_baseColor),
         ),

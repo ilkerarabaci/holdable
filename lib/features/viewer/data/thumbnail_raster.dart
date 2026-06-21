@@ -70,6 +70,12 @@ const List<int> _kRimBlue = [80, 150, 255];
 // ~3px band in the output without being garish.
 const List<double> _kRimFalloff = [0.85, 0.72, 0.58, 0.44, 0.30, 0.16];
 
+/// Half the thumbnail camera's vertical FOV, as a tangent (PO feedback #1's
+/// "70mm" look). ~0.13 sits the camera ≈3.8 model-spans back ⇒ a MILD long-lens
+/// perspective (near faces grow only ~15% vs far), not a wide-angle bulge.
+/// Larger ⇒ closer camera ⇒ stronger perspective.
+const double _kThumbHalfFovTan = 0.13;
+
 /// Rasterizes a flat-shaded iso thumbnail of the mesh into an RGBA byte buffer.
 ///
 /// - [positions] : interleaved-free vertex positions, 3 floats per vertex.
@@ -150,6 +156,13 @@ Uint8List? rasterizeThumbnail({
   final cy = eyMin + spanY / 2;
   final ox = ss / 2 - cx * scale;
   final oy = ss / 2 + cy * scale; // +cy because screen y grows downward
+
+  // 70mm-equivalent MILD perspective (PO feedback #1): sit the camera `camDist`
+  // back along the view axis and perspective-divide by per-vertex depth below, so
+  // near faces grow a touch vs far — a gentle long-lens read. `scale` already
+  // matches the ortho center, so depth 0 projects identically; the 10% fit pad
+  // absorbs the small near-face growth.
+  final camDist = (span / 2) / _kThumbHalfFovTan;
 
   // --- Supersampled buffers: radial charcoal pool + corner vignette first. ---
   final ssBuf = Uint8List(ss * ss * 4);
@@ -288,15 +301,21 @@ Uint8List? rasterizeThumbnail({
     final cb = (_linearToSrgb(lb) * 255.0).round();
 
     // Eye-space projection → (supersampled) screen pixels + per-vertex depth.
-    final s0x = ox + (p0x * right[0] + p0y * right[1] + p0z * right[2]) * scale;
-    final s0y = oy - (p0x * up[0] + p0y * up[1] + p0z * up[2]) * scale;
+    // Perspective-divide for the mild 70mm look: ps = scale·camDist/(camDist+depth).
+    // depth 0 ⇒ ps = scale (matches the ortho fit); near (depth<0) grows, far
+    // shrinks. camDist ≫ |depth|, so the divisor is always > 0.
     final d0 = p0x * fwd[0] + p0y * fwd[1] + p0z * fwd[2];
-    final s1x = ox + (p1x * right[0] + p1y * right[1] + p1z * right[2]) * scale;
-    final s1y = oy - (p1x * up[0] + p1y * up[1] + p1z * up[2]) * scale;
+    final ps0 = scale * camDist / (camDist + d0);
+    final s0x = ox + (p0x * right[0] + p0y * right[1] + p0z * right[2]) * ps0;
+    final s0y = oy - (p0x * up[0] + p0y * up[1] + p0z * up[2]) * ps0;
     final d1 = p1x * fwd[0] + p1y * fwd[1] + p1z * fwd[2];
-    final s2x = ox + (p2x * right[0] + p2y * right[1] + p2z * right[2]) * scale;
-    final s2y = oy - (p2x * up[0] + p2y * up[1] + p2z * up[2]) * scale;
+    final ps1 = scale * camDist / (camDist + d1);
+    final s1x = ox + (p1x * right[0] + p1y * right[1] + p1z * right[2]) * ps1;
+    final s1y = oy - (p1x * up[0] + p1y * up[1] + p1z * up[2]) * ps1;
     final d2 = p2x * fwd[0] + p2y * fwd[1] + p2z * fwd[2];
+    final ps2 = scale * camDist / (camDist + d2);
+    final s2x = ox + (p2x * right[0] + p2y * right[1] + p2z * right[2]) * ps2;
+    final s2y = oy - (p2x * up[0] + p2y * up[1] + p2z * up[2]) * ps2;
 
     // Screen-space edge area; |area| ~ 0 ⇒ edge-on, skip.
     final area = (s1x - s0x) * (s2y - s0y) - (s2x - s0x) * (s1y - s0y);

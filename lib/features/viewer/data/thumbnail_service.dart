@@ -19,7 +19,11 @@ import 'thumbnail_raster.dart';
 
 /// Version-stamped thumbnail file suffix. Bump the token when the rasterizer's
 /// output changes so old thumbnails are detected as stale and regenerated.
-const String kThumbnailVersionSuffix = '.t5.png';
+// .t6: viewer + service paths unified on kThumbnailAzimuth/Elevation (was a
+// split — scene_view baked π/4 iso while the service used 0.0 head-on → a mixed
+// library) AND the rasterizer gained the 70mm mild perspective. Bump forces every
+// stale render to regenerate at the one uniform view.
+const String kThumbnailVersionSuffix = '.t6.png';
 
 const int _kSize = 256;
 // Uniform library framing (PO feedback #1): object FRONT, slightly tilted up.
