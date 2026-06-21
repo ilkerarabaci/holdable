@@ -61,6 +61,23 @@ Hand _pinchHand(double cx, double cy,
   );
 }
 
+/// A hand with a *specific* pinch ratio (thumb/index gap = [ratio] × span) —
+/// used to exercise the grab hysteresis band between kPinchEnter and kPinchExit.
+Hand _gapHand(double cx, double cy,
+    {required double ratio, double span = 0.30}) {
+  final gap = ratio * span; // thumb/index separated horizontally by `gap`
+  return _hand(
+    wx: cx,
+    wy: cy,
+    mmx: cx,
+    mmy: cy - span, // roll -pi/2, exact span
+    thumbX: cx - gap / 2,
+    thumbY: cy - 0.25,
+    indexX: cx + gap / 2,
+    indexY: cy - 0.25,
+  );
+}
+
 void main() {
   group('Hand landmark math', () {
     test('open hand is not pinching, pinch hand is', () {
@@ -99,9 +116,9 @@ void main() {
       expect(c.isGrabbing, isTrue);
       // Move hand right (+x) and up (-y in image) by 0.1 each.
       c.update(HandFrame([_pinchHand(0.6, 0.4)]));
-      // tx = (0.6-0.5)*2 = +0.2 ; ty = -(0.4-0.5)*2 = +0.2
-      expect(c.pose.tx, closeTo(0.2, 1e-6));
-      expect(c.pose.ty, closeTo(0.2, 1e-6));
+      // tx = (0.6-0.5)*gain ; ty = -(palm.y delta = -0.1)*gain  → both +0.1*gain.
+      expect(c.pose.tx, closeTo(0.1 * HandModelController.kTranslateGain, 1e-6));
+      expect(c.pose.ty, closeTo(0.1 * HandModelController.kTranslateGain, 1e-6));
     });
 
     test('releasing the pinch leaves the model in place (no snap-back)', () {
@@ -117,13 +134,49 @@ void main() {
     test('re-grabbing is relative — no jump to the new hand position', () {
       final c = HandModelController(smoothing: 1.0);
       c.update(HandFrame([_pinchHand(0.5, 0.5)]));
-      c.update(HandFrame([_pinchHand(0.7, 0.5)])); // tx -> 0.4
+      c.update(HandFrame([_pinchHand(0.7, 0.5)])); // tx -> 0.2*gain
       c.update(HandFrame([_openHand(0.7, 0.5)])); // release at far side
       // Re-grab somewhere else and nudge: pose must move only by the new delta.
       c.update(HandFrame([_pinchHand(0.2, 0.5)])); // re-grab, no move yet
-      expect(c.pose.tx, closeTo(0.4, 1e-6));
-      c.update(HandFrame([_pinchHand(0.25, 0.5)])); // +0.05*2 = +0.1
-      expect(c.pose.tx, closeTo(0.5, 1e-6));
+      expect(c.pose.tx, closeTo(0.2 * HandModelController.kTranslateGain, 1e-6));
+      c.update(HandFrame([_pinchHand(0.25, 0.5)])); // +0.05*gain
+      expect(
+          c.pose.tx, closeTo(0.25 * HandModelController.kTranslateGain, 1e-6));
+    });
+  });
+
+  group('HandModelController — grab hysteresis & input smoothing', () {
+    test('a grab holds through a partial open (hysteresis band)', () {
+      final c = HandModelController(smoothing: 1.0);
+      c.update(HandFrame([_pinchHand(0.5, 0.5)])); // ratio 0 < enter → grab
+      expect(c.isGrabbing, isTrue);
+      // Ratio between enter (0.50) and exit (0.65): still held, no flicker.
+      c.update(HandFrame([_gapHand(0.5, 0.5, ratio: 0.58)]));
+      expect(c.isGrabbing, isTrue);
+      // Opening clearly past exit releases.
+      c.update(HandFrame([_openHand(0.5, 0.5)]));
+      expect(c.isGrabbing, isFalse);
+    });
+
+    test('a ratio in the hysteresis band does not START a grab', () {
+      final c = HandModelController(smoothing: 1.0);
+      c.update(HandFrame([_gapHand(0.5, 0.5, ratio: 0.58)]));
+      expect(c.isGrabbing, isFalse); // needs < enter (0.50) to begin
+    });
+
+    test('landmark smoothing damps a sudden jump (input low-pass)', () {
+      final c = HandModelController(smoothing: 1.0, landmarkSmoothing: 0.5);
+      c.update(HandFrame([_pinchHand(0.5, 0.5)])); // grab; first frame passes raw
+      c.update(HandFrame([_pinchHand(0.7, 0.5)])); // palm smoothed 0.5 → 0.6
+      // Half the raw 0.2 step: tx ≈ 0.1 × gain, not 0.2 × gain.
+      expect(c.pose.tx, closeTo(0.1 * HandModelController.kTranslateGain, 1e-6));
+    });
+
+    test('landmark smoothing off (==1) keeps frame-precise math', () {
+      final c = HandModelController(smoothing: 1.0, landmarkSmoothing: 1.0);
+      c.update(HandFrame([_pinchHand(0.5, 0.5)]));
+      c.update(HandFrame([_pinchHand(0.7, 0.5)]));
+      expect(c.pose.tx, closeTo(0.2 * HandModelController.kTranslateGain, 1e-6));
     });
   });
 

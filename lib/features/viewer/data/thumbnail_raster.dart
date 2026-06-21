@@ -9,12 +9,15 @@
 //
 // It draws the mesh into an off-screen RGBA byte buffer with a z-buffered
 // barycentric triangle fill and flat (per-face) shading: half-Lambert key/fill/
-// rim diffuse, a cheap Blinn-Phong specular highlight, and a faint Fresnel rim,
-// over a vertical background gradient. Rendering happens at 2× (SSAA) and is
-// box-downsampled to the requested size for clean edges. The output is a
-// top-down RGBA8888 buffer; the caller encodes it to PNG on the UI isolate
-// (ui.decodeImageFromPixels + toByteData(png)), keeping this file free of any
-// dart:ui / engine dependency so it runs in the parse isolate and is
+// rim diffuse, a cheap Blinn-Phong specular highlight, and a faint Fresnel rim.
+// The "Studio Void / Prism" look (design direction D): the model sits on a
+// radial charcoal pool with a corner vignette and a soft grounded contact
+// shadow, finished with a faint chromatic rim — a red fringe just off the
+// silhouette's right edge and a blue fringe off the left (Holdable's spectrum
+// identity), all achievable without a GPU blur. Rendering happens at 2× (SSAA)
+// and is box-downsampled for clean edges. The output is a top-down RGBA8888
+// buffer; the caller encodes it to PNG on the UI isolate, keeping this file free
+// of any dart:ui / engine dependency so it runs in the parse isolate and is
 // unit-testable with plain `dart`.
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -43,9 +46,29 @@ const double _kRim = 0.18;
 /// downsampled, so edges are anti-aliased without any per-pixel coverage math.
 const int _kSsaa = 2;
 
-/// Vertical background gradient: the top is this fraction lighter and the
-/// bottom this fraction darker than [bgColor] (model pixels overwrite it).
-const double _kBgGradient = 0.08;
+// --- "Studio Void / Prism" background treatment (design direction D) ---------
+// Radial charcoal pool: a soft pedestal of light off-center toward the upper
+// left, deepening to near-black at the edges.
+const List<double> _kPoolInner = [0x23 / 255, 0x28 / 255, 0x30 / 255]; // #232830
+const List<double> _kPoolMid = [0x14 / 255, 0x17 / 255, 0x1D / 255]; // #14171D
+const List<double> _kPoolOuter = [0x0A / 255, 0x0C / 255, 0x10 / 255]; // #0A0C10
+const double _kPoolFocalX = 0.40, _kPoolFocalY = 0.30; // focal, fraction of frame
+const double _kPoolMidStop = 0.46; // radius fraction where the mid stop sits
+const double _kVignette = 0.36; // extra corner darkening (0..1)
+
+/// Soft contact shadow grounding the model under its projected base.
+const double _kContactStrength = 0.55;
+
+/// Chromatic "Prism" rim: a faint red fringe just off the model's right edge and
+/// a blue fringe off the left. Strength by distance (in supersampled px) from
+/// the silhouette — a 3-px falloff fakes a soft fringe with no blur kernel.
+const List<int> _kRimRed = [255, 90, 120];
+const List<int> _kRimBlue = [80, 150, 255];
+// Strength by distance (supersampled px) from the silhouette. Widened 3→6 px
+// and strengthened (alpha.53): the rim was ~1px after downsample → invisible at
+// 256px, so the "D" redesign didn't read. This makes the chromatic edge a clear
+// ~3px band in the output without being garish.
+const List<double> _kRimFalloff = [0.85, 0.72, 0.58, 0.44, 0.30, 0.16];
 
 /// Rasterizes a flat-shaded iso thumbnail of the mesh into an RGBA byte buffer.
 ///
@@ -55,7 +78,8 @@ const double _kBgGradient = 0.08;
 /// - [azimuth]/[elevation] : the iso camera angles (radians), matching the
 ///   viewer's default view so the thumbnail and the opened model agree.
 /// - [size] : output is [size] x [size] pixels.
-/// - [bgColor] : 0xAARRGGBB background fill (top/bottom shaded into a gradient).
+/// - [bgColor] : retained for API compatibility; the D treatment paints a fixed
+///   radial charcoal pool, so this is currently unused by the background fill.
 /// - [surfaceColor] : 0xRRGGBB model base color the light shades.
 ///
 /// Returns a `size*size*4` RGBA buffer (row 0 = top), or `null` if the mesh has
@@ -127,29 +151,51 @@ Uint8List? rasterizeThumbnail({
   final ox = ss / 2 - cx * scale;
   final oy = ss / 2 + cy * scale; // +cy because screen y grows downward
 
-  // --- Supersampled buffers: vertical background gradient first. ---
+  // --- Supersampled buffers: radial charcoal pool + corner vignette first. ---
   final ssBuf = Uint8List(ss * ss * 4);
-  final bgA = (bgColor >> 24) & 0xff;
-  final bgR = (bgColor >> 16) & 0xff;
-  final bgG = (bgColor >> 8) & 0xff;
-  final bgB = bgColor & 0xff;
+  final fx = _kPoolFocalX * (ss - 1);
+  final fy = _kPoolFocalY * (ss - 1);
+  // Normalize the radius so the gradient reaches the outer stop near the far
+  // corner (the design's ~125%/115% ellipse).
+  final farX = math.max(fx, (ss - 1) - fx);
+  final farY = math.max(fy, (ss - 1) - fy);
+  final maxR = math.max(1e-6, math.sqrt(farX * farX + farY * farY) / 1.15);
+  final ctr = (ss - 1) / 2.0;
+  final vMax = math.max(1e-6, math.sqrt(2 * ctr * ctr));
   for (var y = 0; y < ss; y++) {
-    // f: +_kBgGradient at the top row → -_kBgGradient at the bottom row.
-    final f = ss > 1
-        ? _kBgGradient * (1.0 - 2.0 * (y / (ss - 1)))
-        : 0.0;
-    final r = _clamp8((bgR * (1.0 + f)).round());
-    final g = _clamp8((bgG * (1.0 + f)).round());
-    final b = _clamp8((bgB * (1.0 + f)).round());
     var oi = y * ss * 4;
     for (var x = 0; x < ss; x++) {
-      ssBuf[oi] = r;
-      ssBuf[oi + 1] = g;
-      ssBuf[oi + 2] = b;
-      ssBuf[oi + 3] = bgA;
+      final dx = x - fx, dy = y - fy;
+      var t = math.sqrt(dx * dx + dy * dy) / maxR;
+      if (t > 1.0) t = 1.0;
+      double rr, gg, bb;
+      if (t < _kPoolMidStop) {
+        final u = t / _kPoolMidStop;
+        rr = _kPoolInner[0] + (_kPoolMid[0] - _kPoolInner[0]) * u;
+        gg = _kPoolInner[1] + (_kPoolMid[1] - _kPoolInner[1]) * u;
+        bb = _kPoolInner[2] + (_kPoolMid[2] - _kPoolInner[2]) * u;
+      } else {
+        final u = (t - _kPoolMidStop) / (1.0 - _kPoolMidStop);
+        rr = _kPoolMid[0] + (_kPoolOuter[0] - _kPoolMid[0]) * u;
+        gg = _kPoolMid[1] + (_kPoolOuter[1] - _kPoolMid[1]) * u;
+        bb = _kPoolMid[2] + (_kPoolOuter[2] - _kPoolMid[2]) * u;
+      }
+      // Quadratic corner vignette on top.
+      final ddx = x - ctr, ddy = y - ctr;
+      final vd = math.sqrt(ddx * ddx + ddy * ddy) / vMax;
+      final vig = 1.0 - _kVignette * vd * vd;
+      ssBuf[oi] = _clamp8((rr * vig * 255.0).round());
+      ssBuf[oi + 1] = _clamp8((gg * vig * 255.0).round());
+      ssBuf[oi + 2] = _clamp8((bb * vig * 255.0).round());
+      ssBuf[oi + 3] = 0xff;
       oi += 4;
     }
   }
+
+  // --- Soft contact shadow at the model's projected base (drawn into the bg;
+  // the model overdraws its center, leaving a grounding pool around the base). ---
+  _contactShadow(ssBuf, ss, spanX * scale, spanY * scale);
+
   final zbuf = Float32List(ss * ss)..fillRange(0, ss * ss, double.infinity);
 
   // Surface base color, linearized so shading happens in (approx) linear light
@@ -290,8 +336,71 @@ Uint8List? rasterizeThumbnail({
     }
   }
 
+  // --- Chromatic "Prism" rim: tint bg pixels just off the silhouette — red on
+  // the right edge, blue on the left — using the z-buffer as the model mask. ---
+  _chromaticRim(ssBuf, zbuf, ss);
+
   // --- Box-downsample the SS buffer to the requested size. ---
   return _downsample(ssBuf, ss, size, _kSsaa);
+}
+
+/// Darkens an elliptical contact pool centered under the model's projected base.
+/// [pw]/[ph] are the model's projected width/height in supersampled pixels.
+void _contactShadow(Uint8List buf, int ss, double pw, double ph) {
+  final ccx = ss / 2.0;
+  final ccy = ss / 2.0 + (ph / 2.0) * 0.98; // just below the lowest model point
+  final rx = math.max((pw / 2.0) * 0.95, 6.0);
+  final ry = math.max(rx * 0.16, 3.0);
+  final yA = math.max(0, (ccy - ry).floor());
+  final yB = math.min(ss - 1, (ccy + ry).ceil());
+  final xA = math.max(0, (ccx - rx).floor());
+  final xB = math.min(ss - 1, (ccx + rx).ceil());
+  for (var y = yA; y <= yB; y++) {
+    final ny = (y - ccy) / ry;
+    for (var x = xA; x <= xB; x++) {
+      final nx = (x - ccx) / rx;
+      final d2 = nx * nx + ny * ny;
+      if (d2 >= 1.0) continue;
+      final k = _kContactStrength * (1.0 - d2); // soft falloff to the rim
+      final oi = (y * ss + x) * 4;
+      buf[oi] = (buf[oi] * (1.0 - k)).round();
+      buf[oi + 1] = (buf[oi + 1] * (1.0 - k)).round();
+      buf[oi + 2] = (buf[oi + 2] * (1.0 - k)).round();
+    }
+  }
+}
+
+/// Paints the chromatic rim fringe onto background pixels adjacent to the model
+/// silhouette: red where the model lies just to the left (the right edge), blue
+/// where it lies just to the right (the left edge). [z] != ∞ marks model pixels.
+void _chromaticRim(Uint8List buf, Float32List z, int ss) {
+  for (var y = 0; y < ss; y++) {
+    final row = y * ss;
+    for (var x = 0; x < ss; x++) {
+      if (z[row + x] != double.infinity) continue; // only tint bg pixels
+      for (var d = 0; d < _kRimFalloff.length; d++) {
+        final mx = x - (d + 1);
+        if (mx >= 0 && z[row + mx] != double.infinity) {
+          _tint(buf, (row + x) * 4, _kRimRed, _kRimFalloff[d]);
+          break;
+        }
+      }
+      for (var d = 0; d < _kRimFalloff.length; d++) {
+        final mx = x + (d + 1);
+        if (mx < ss && z[row + mx] != double.infinity) {
+          _tint(buf, (row + x) * 4, _kRimBlue, _kRimFalloff[d]);
+          break;
+        }
+      }
+    }
+  }
+}
+
+/// Lerps the RGB at [oi] toward [c] by [k] (a soft additive-style tint).
+void _tint(Uint8List buf, int oi, List<int> c, double k) {
+  buf[oi] = _clamp8((buf[oi] + (c[0] - buf[oi]) * k).round());
+  buf[oi + 1] = _clamp8((buf[oi + 1] + (c[1] - buf[oi + 1]) * k).round());
+  buf[oi + 2] = _clamp8((buf[oi + 2] + (c[2] - buf[oi + 2]) * k).round());
 }
 
 /// Box-downsamples an [ss]×[ss] RGBA buffer to [size]×[size] by averaging each

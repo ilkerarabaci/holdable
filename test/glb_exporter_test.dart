@@ -101,5 +101,35 @@ void main() {
       expect(gltf['meshes'], isNotEmpty);
       expect(gltf['accessors'][2]['count'], mesh.triangleCount * 3);
     });
+
+    test('opaque by default: alphaMode OPAQUE, baseColorFactor alpha 1.0', () {
+      final mat = _readGltfJson(glbFromMesh(_oneTriangle()))['materials'][0];
+      expect(mat['alphaMode'], 'OPAQUE');
+      final f =
+          (mat['pbrMetallicRoughness']['baseColorFactor'] as List).cast<num>();
+      expect(f[3], 1.0);
+    });
+
+    test('opacity < 1 bakes BLEND + the alpha into baseColorFactor (#10)', () {
+      final mat = _readGltfJson(
+          glbFromMesh(_oneTriangle(), opacity: 0.35))['materials'][0];
+      expect(mat['alphaMode'], 'BLEND');
+      final f =
+          (mat['pbrMetallicRoughness']['baseColorFactor'] as List).cast<num>();
+      expect(f[3], closeTo(0.35, 1e-9));
+    });
+
+    test('color + opacity are independent (rgb from color, alpha from opacity)',
+        () {
+      // Pure red sRGB with half opacity.
+      final mat = _readGltfJson(glbFromMesh(_oneTriangle(),
+          baseColorArgb: 0xFFFF0000, opacity: 0.5))['materials'][0];
+      final f =
+          (mat['pbrMetallicRoughness']['baseColorFactor'] as List).cast<num>();
+      expect(f[0], closeTo(1.0, 1e-6)); // srgbToLinear(1.0)
+      expect(f[1], closeTo(0.0, 1e-6));
+      expect(f[2], closeTo(0.0, 1e-6));
+      expect(f[3], closeTo(0.5, 1e-9));
+    });
   });
 }

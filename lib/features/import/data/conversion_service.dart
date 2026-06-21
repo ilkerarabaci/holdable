@@ -18,6 +18,29 @@ const Set<String> kConvertibleExtensions = {
   'igs',
 };
 
+/// Formats that are EXPORT-BOUND in Blender's single-threaded glTF exporter:
+/// even a medium scene blows past the in-request conversion timeout (a 49 MB
+/// .blend loaded in ~5 s but its export ran past 7 min — see convert.py). These
+/// always convert in the async Cloud Run Job — which streams the upload from
+/// disk and isn't request-bound — regardless of file size, so they no longer
+/// 504 on the synchronous path.
+const Set<String> kForceAsyncExtensions = {'blend'};
+
+/// Routing decision used by the import flow: true ⇒ convert in the async Cloud
+/// Run Job (enqueue → await → download); false ⇒ the in-request sync path
+/// ([ConversionService.convertToGlb]). Async when the file is over the sync cap
+/// OR its format is export-bound (see [kForceAsyncExtensions]). Pure so the
+/// routing contract is unit-tested without touching the network.
+bool conversionNeedsAsyncJob({
+  required int bytes,
+  required String ext,
+  required int syncMaxBytes,
+}) {
+  final e = ext.toLowerCase().replaceAll('.', '');
+  if (kForceAsyncExtensions.contains(e)) return true;
+  return bytes > syncMaxBytes;
+}
+
 /// Base URL of the conversion service (Cloud Run, europe-west3). Public HTTPS,
 /// so any device can convert without the dev PC. For local-Docker dev, point
 /// this at the dev machine's LAN IP (and re-enable cleartext in the manifest).

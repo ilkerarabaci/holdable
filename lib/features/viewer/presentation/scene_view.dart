@@ -17,6 +17,7 @@ import 'package:thermion_flutter/thermion_flutter.dart' hide Material;
 
 import '../data/model_parser.dart';
 import '../data/thumbnail_raster.dart';
+import 'environment_backdrop.dart';
 
 /// Status pushed up to the host screen (drives the loading spinner + Info panel).
 class ModelSceneStatus {
@@ -70,6 +71,15 @@ class ModelSceneController {
   /// Sets the model's base color (the surface tint the light shades).
   void setColor(Color color) => _state?._setColor(color);
 
+  /// The user's chosen base color as sRGB 0xAARRGGBB, or null when they haven't
+  /// picked one (or a texture is showing) so callers fall back to the model's
+  /// own color. Lets the AR export bake the viewer's color (Faz D / #10).
+  int? get pickedColorArgb => _state?._pickedColorArgb;
+
+  /// Current surface opacity (1.0 solid, 0.35 in x-ray), baked into the AR
+  /// export so a see-through model stays see-through in AR (Faz D / #10).
+  double get currentOpacity => _state?._currentAlpha ?? 1.0;
+
   /// Light-rig intensity multiplier (0.2–2.5; 1.0 = default brightness).
   void setLightIntensity(double factor) =>
       _state?._setLightIntensity(factor);
@@ -77,9 +87,11 @@ class ModelSceneController {
   /// Rotates the whole light rig around Y by [azimuthRad] (relight angle).
   void setLightAngle(double azimuthRad) => _state?._setLightAzimuth(azimuthRad);
 
-  /// Environment (image-based) lighting amount 0..1 (0 = off; reflections +
-  /// soft ambient as it rises).
-  void setEnvironment(double amount) => _state?._setEnvironment(amount);
+  /// Selects the lighting environment (Faz C / PO #6): swings/recolors the
+  /// directional rig and loads/removes the bundled IBL to match the picked
+  /// procedural backdrop. The backdrop itself is a Flutter layer (see
+  /// EnvironmentBackdrop); this only drives the renderer's lighting.
+  void setEnvironment(AppEnvironment env) => _state?._setEnvironment(env);
 
   /// Applies a bundled texture asset (e.g. `assets/textures/wood.jpg`) to the
   /// model's surface, or removes any texture when [assetPath] is null (the
@@ -160,6 +172,109 @@ const List<(double, double, double, double)> _kLightRig = [
   (-0.1, -0.9, 0.3, 14000),
 ];
 
+/// The colour to bake into the AR export (Faz D / #10): the user's picked colour
+/// (sRGB 0xAARRGGBB) when they've chosen one and no texture is showing, else null
+/// so the caller falls back to the model's own colour. Pure → unit-tested.
+int? arPickedColorArgb({
+  required bool colorPicked,
+  required bool hasTexture,
+  required int baseColorArgb,
+}) =>
+    (colorPicked && !hasTexture) ? baseColorArgb : null;
+
+/// A pure light-rig preset for an [AppEnvironment] (Faz C / PO #6). It nudges
+/// the directional rig to *match* the procedural backdrop the user picked, and
+/// is COMPOSED on top of the user's own intensity/azimuth sliders (it never
+/// clobbers them — see `_setLightIntensity` / `_setLightAzimuth`):
+/// - [intensityScale] multiplies every sun's intensity (on top of the user's),
+/// - [azimuthBias] (radians) is added to the rig azimuth (swings the key),
+/// - [iblAmount] (0..1) is the bundled studio IBL strength (0 = no IBL),
+/// - [colorTemperature] (Kelvin, null = neutral) optionally warms/cools the rig.
+class EnvLightPreset {
+  const EnvLightPreset({
+    required this.intensityScale,
+    required this.azimuthBias,
+    required this.iblAmount,
+    this.colorTemperature,
+  });
+  final double intensityScale;
+  final double azimuthBias;
+  final double iblAmount;
+  final double? colorTemperature;
+}
+
+/// Maps an [AppEnvironment] to its [EnvLightPreset]. Pure (no GPU/viewer) so the
+/// env → light-preset contract is unit-testable. `none` is the neutral identity
+/// (the directional rig + filmic baseline, unchanged from before Faz C).
+EnvLightPreset environmentLightPreset(AppEnvironment env) {
+  switch (env) {
+    case AppEnvironment.none:
+      return const EnvLightPreset(
+          intensityScale: 1.0, azimuthBias: 0.0, iblAmount: 0.0);
+    case AppEnvironment.cafe:
+      // Warm side key swung toward frame-right (~3500K) — the café board's
+      // window-light look. No IBL (the bokeh backdrop carries the ambience).
+      return const EnvLightPreset(
+        intensityScale: 1.0,
+        azimuthBias: 0.6,
+        iblAmount: 0.0,
+        colorTemperature: 3500,
+      );
+    case AppEnvironment.sky:
+      // Bright top key + soft ambient from a gentle IBL (neutral daylight).
+      return const EnvLightPreset(
+        intensityScale: 1.15,
+        azimuthBias: 0.0,
+        iblAmount: 0.30,
+        colorTemperature: 6500,
+      );
+    case AppEnvironment.studio:
+      // Dual-softbox neutral: the brightest rig + the strongest IBL.
+      return const EnvLightPreset(
+        intensityScale: 1.25,
+        azimuthBias: 0.0,
+        iblAmount: 0.50,
+        colorTemperature: 6500,
+      );
+  }
+}
+
+/// Direction the ground-shadow sun should point so the cast shadow stays
+/// CONSISTENT with the lighting (#4, Efe feedback #3): the shadow must fall
+/// AWAY from the dominant key light, so the sun points along the key's own
+/// direction. We take the rig's key sun ([_kLightRig]`[0]`) and rotate it about
+/// Y by the SAME composed azimuth the rig uses (`userAzimuth + envBias`) via the
+/// same Y-rotation as [_ModelSceneViewState._rotatedDir]. Returns a normalized
+/// (x,y,z). Pure — no GPU/viewer — so the contract is unit-testable.
+({double x, double y, double z}) groundShadowSunDirection({
+  required double keyX,
+  required double keyY,
+  required double keyZ,
+  required double azimuth,
+}) {
+  final ca = math.cos(azimuth), sa = math.sin(azimuth);
+  var x = keyX * ca + keyZ * sa;
+  final y = keyY;
+  var z = -keyX * sa + keyZ * ca;
+  final len = math.sqrt(x * x + y * y + z * z);
+  if (len > 1e-12) {
+    x /= len;
+    z /= len;
+    return (x: x, y: y / len, z: z);
+  }
+  return (x: 0.0, y: -1.0, z: 0.0);
+}
+
+/// The ground-shadow sun's intensity for a user [lightIntensity] multiplier and
+/// the active environment [intensityScale] (#4): the cast shadow should respond
+/// to how bright the rig is. Clamped so a very dim/very bright rig still yields
+/// a readable contact shadow. Pure — unit-testable.
+double groundShadowSunIntensity({
+  required double lightIntensity,
+  required double envIntensityScale,
+}) =>
+    (60000 * lightIntensity * envIntensityScale).clamp(20000.0, 120000.0);
+
 /// Resolved camera projection parameters for a lens preset (#9). One of these
 /// is non-null per preset, telling [_ModelSceneViewState._applyProjection]
 /// which Filament projection call to make:
@@ -210,11 +325,22 @@ class GroundPlaneGeometry {
   final List<int> indices;
 }
 
+/// World-space Y of the model's base (AABB min-Y) after the viewer's fit
+/// transform (#4, Efe feedback #3). `_applyMode` centers the model then scales
+/// it by [fit] about the origin, so the lowest point lands at
+/// `-(sizeY/2)·fit` — NOT `-_kFitRadius` (the bounding-*sphere* radius), which
+/// floats the object above the catcher for any model that isn't a vertical
+/// stick. [modelSizeY] is the AABB height in the file's units; [fit] is the
+/// uniform fit scale `_applyMode` applies. Pure — unit-testable without a GPU.
+double groundPlaneWorldY({required double modelSizeY, required double fit}) =>
+    -(modelSizeY * 0.5) * fit;
+
 /// Builds a horizontal shadow-catcher quad sitting at [y] (the model's bottom),
 /// spanning ±[half] in x and z, with an up normal. The model is normalized so
-/// its bounding sphere has radius [_kFitRadius] about the origin, so callers
-/// pass `y = -_kFitRadius` (bottom) and `half = _kFitRadius * 4` (a generous
-/// floor for the shadow to land on). Pure — unit-tested without a GPU.
+/// its bounding sphere has radius [_kFitRadius] about the origin; callers pass
+/// the AABB-base [y] from [groundPlaneWorldY] (so the object sits ON the floor)
+/// and `half = _kFitRadius * 4` (a generous floor for the shadow to land on).
+/// Pure — unit-tested without a GPU.
 GroundPlaneGeometry buildGroundPlane({required double y, required double half}) {
   final positions = Float32List.fromList(<double>[
     -half, y, -half, // 0
@@ -374,6 +500,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
 
   String _mode = 'solid';
   Color _baseColor = _kNeutral;
+  bool _colorPicked = false; // user has chosen a color (vs the neutral default)
   double _currentAlpha = 1.0; // 0.35 in x-ray
 
   /// Camera lens/projection preset (#9): '70mm' (default), '24mm', 'fisheye'
@@ -436,6 +563,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   double _lightIntensity = 1.0;
   double _lightAzimuth = 0.0;
   bool _iblLoaded = false; // image-based-lighting environment currently active
+  // Lighting environment preset (Faz C / PO #6): composed on top of the user's
+  // intensity/azimuth sliders when the rig is (re)built/(re)aimed.
+  EnvLightPreset _envPreset = environmentLightPreset(AppEnvironment.none);
 
   // --- Ground/contact shadow (#4). Off by default. The shadow-catcher quad
   // and its dedicated overhead castShadows sun are kept OUT of [_lights] so the
@@ -443,6 +573,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   bool _groundShadow = false;
   ThermionEntity? _shadowLight; // overhead sun that casts the shadow
   ThermionAsset? _groundPlane; // shadow-catcher quad asset
+  MaterialInstance? _groundMaterial; // its material — must be destroyed with it
   bool _rebuilding = false;
   String? _pendingMode; // latest mode requested while a rebuild was in flight
 
@@ -522,12 +653,13 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       final viewer = await ThermionFlutterPlugin.createViewer();
       await viewer.setPostProcessing(true);
       await viewer.setAntiAliasing(false, true, false); // FXAA
-      await viewer.setBackgroundColor(
-        widget.background.r,
-        widget.background.g,
-        widget.background.b,
-        1.0,
-      );
+      // Clear the skybox so the background is TRANSPARENT (Faz C / PO #6):
+      // Thermion renders transparent by default, and setBackgroundColor only
+      // looked opaque because it builds an opaque skybox. Removing the skybox
+      // lets the Flutter EnvironmentBackdrop behind the Thermion texture show
+      // through — it now owns the backdrop for ALL environments, including None
+      // (where it paints the same flat widget.background colour as before).
+      await viewer.removeSkybox();
       // No IBL/skybox is bundled, so lighting is entirely direct. With only a
       // key + fill + rim trio, a low-poly model (e.g. the 8-face octahedron) can
       // still have facets that face away from every light → pure black. Surround
@@ -537,8 +669,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       _lights.clear();
       for (final (x, y, z, inten) in _kLightRig) {
         final e = await viewer.addDirectLight(DirectLight.sun(
-          direction: _rotatedDir(x, y, z, _lightAzimuth),
-          intensity: inten * _lightIntensity,
+          direction:
+              _rotatedDir(x, y, z, _lightAzimuth + _envPreset.azimuthBias),
+          intensity: inten * _lightIntensity * _envPreset.intensityScale,
+          colorTemperature: _envPreset.colorTemperature,
           castShadows: false,
         ));
         _lights.add(e);
@@ -551,8 +685,8 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       } catch (_) {/* keep default tone mapping */}
       // Image-based lighting (bundled studio environment) is OFF by default —
       // it overexposed the look, and the directional rig + filmic is the better
-      // baseline. The user opts in + dials it via the Render panel's Environment
-      // slider (see _setEnvironment), which loads/removes the IBL on demand.
+      // baseline. The user opts in via the Render panel's Environment picker
+      // (see _setEnvironment), which loads/removes the IBL per the picked preset.
       final camera = await viewer.getActiveCamera();
       if (!mounted) {
         await viewer.dispose();
@@ -606,6 +740,13 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       // texture pipeline (crash-loop protection) — the model still opens plain.
       _texEncoded = _texCrashStep == null ? prepared.textureBytes : null;
       if (_viewerReady) await _applyMode(_mode, frame: true);
+      // If the ground shadow is on and the model changed in place, re-base the
+      // shadow-catcher at the NEW model's bottom (its sizeY differs). Reuses the
+      // same guarded enable/disable path — best-effort, no new crash surface.
+      if (_groundShadow && _viewerReady) {
+        await _disableGroundShadow();
+        await _enableGroundShadow();
+      }
       if (staleTex != null) {
         try {
           await staleTex.destroy();
@@ -627,6 +768,15 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       ((c.g * 255).round() << 8) |
       (c.b * 255).round();
 
+  /// The user's picked color as sRGB 0xAARRGGBB, or null when untouched or a
+  /// texture is shown — see [ModelSceneController.pickedColorArgb]. The decision
+  /// is the pure [arPickedColorArgb] so it's unit-tested.
+  int? get _pickedColorArgb => arPickedColorArgb(
+        colorPicked: _colorPicked,
+        hasTexture: _texEncoded != null,
+        baseColorArgb: _argb(_baseColor),
+      );
+
   /// Builds (or rebuilds) the on-screen asset for [mode], optionally framing the
   /// camera to it (on first load / model change). Coalesces rapid mode taps.
   Future<void> _applyMode(String mode, {bool frame = false}) async {
@@ -643,10 +793,25 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       if (frame) widget.onStatus(const ModelSceneStatus(loading: true));
 
       final old = _asset;
+      final oldMaterial = _material;
       if (old != null) {
         await viewer.destroyAsset(old);
         _asset = null;
         _material = null;
+      }
+      // destroyAsset frees the asset's vertex/index buffers but NOT the borrowed
+      // MaterialInstance (verified in Thermion's native GeometrySceneAsset
+      // destructor — it never touches _materialInstances). Without this destroy,
+      // every model load AND every render-mode / shading / texture / colour
+      // rebuild orphaned a MaterialInstance in GPU memory — they accumulated for
+      // the whole session (the device GRAPHICS bucket climbed and never dropped
+      // on switch: a cube loaded after heavy models read 358 MB). Destroy AFTER
+      // destroyAsset so it's no longer bound to a live renderable. The shared
+      // ubershader archive material is untouched, so there is no double-free.
+      if (oldMaterial != null) {
+        try {
+          await oldMaterial.destroy();
+        } catch (_) {/* best-effort */}
       }
 
       final bool wireframe = mode == 'wireframe';
@@ -1079,25 +1244,34 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     }
   }
 
-  /// Turns shadows on, adds a dedicated overhead castShadows sun (kept out of
-  /// [_lights]) and lays a shadow-catcher quad just under the model.
+  /// Turns shadows on, adds a dedicated castShadows sun aimed to match the
+  /// lighting (kept out of [_lights]) and lays a shadow-catcher quad at the
+  /// model's BASE so the object visibly sits ON the floor (Efe feedback #3).
   Future<void> _enableGroundShadow() async {
     final viewer = _viewer;
     if (viewer == null) return;
     try {
       await viewer.setShadowsEnabled(true);
-      // One overhead sun aimed almost straight down so the shadow falls neatly
-      // under the model. Kept OUT of _lights so _setLightIntensity's
-      // remove/re-add loop can't drop it.
-      _shadowLight ??= await viewer.addDirectLight(DirectLight.sun(
-        direction: Vector3(0.2, -1.0, 0.1)..normalize(),
-        intensity: 60000,
-        castShadows: true,
-      ));
+      // Dedicated shadow sun, aimed along the dominant key light so the cast
+      // shadow falls AWAY from it (consistent with the rig + environment), at an
+      // intensity that tracks the user's brightness. Kept OUT of _lights so
+      // _setLightIntensity's remove/re-add loop can't drop it.
+      await _aimShadowLight();
       if (_groundPlane == null) {
-        // Quad at the model's bottom (model is normalized to _kFitRadius about
-        // the origin, so bottom ≈ y = -_kFitRadius), spanning a generous floor.
-        final g = buildGroundPlane(y: -_kFitRadius, half: _kFitRadius * 4);
+        // Quad at the model's AABB base in world space — the model is centered
+        // then scaled by `fit` about the origin, so its lowest point is at
+        // -(sizeY/2)·fit (NOT -_kFitRadius, the bounding-sphere radius, which
+        // would float the object). Spans a generous floor for the shadow.
+        final p = _model;
+        final double groundY;
+        if (p != null && p.camDistance > 1e-9) {
+          final modelRadius = p.camDistance / 3.0;
+          final fit = modelRadius > 1e-9 ? _kFitRadius / modelRadius : 1.0;
+          groundY = groundPlaneWorldY(modelSizeY: p.sizeY, fit: fit);
+        } else {
+          groundY = -_kFitRadius; // no model yet — fall back to the old place
+        }
+        final g = buildGroundPlane(y: groundY, half: _kFitRadius * 4);
         final geometry = Geometry(
           g.positions,
           g.indices,
@@ -1127,6 +1301,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
           releaseSourceData: true,
         );
         _groundPlane = plane;
+        _groundMaterial = material;
         await viewer.addToScene(plane);
       }
     } catch (_) {
@@ -1141,13 +1316,58 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     if (viewer == null) return;
     try {
       final plane = _groundPlane;
+      final planeMat = _groundMaterial;
       _groundPlane = null;
+      _groundMaterial = null;
       if (plane != null) await viewer.destroyAsset(plane);
+      // Free the catcher's MaterialInstance too (destroyAsset doesn't) — same
+      // leak as the model path; otherwise each shadow toggle / model switch with
+      // shadow on orphans one.
+      if (planeMat != null) {
+        try {
+          await planeMat.destroy();
+        } catch (_) {/* best-effort */}
+      }
       final light = _shadowLight;
       _shadowLight = null;
       if (light != null) await viewer.removeLight(light);
       await viewer.setShadowsEnabled(false);
     } catch (_) {/* best-effort teardown */}
+  }
+
+  /// (Re)creates the ground-shadow sun so the cast shadow stays CONSISTENT with
+  /// the lighting (Efe feedback #3): it points along the dominant key light
+  /// ([_kLightRig]`[0]`) rotated by the SAME composed azimuth the rig uses
+  /// (`_lightAzimuth + _envPreset.azimuthBias`) — so the shadow falls away from
+  /// the key — and its intensity tracks `_lightIntensity` (× the env scale).
+  ///
+  /// Thermion has no runtime intensity setter (see [_rebuildRig]), so changing
+  /// brightness means remove + re-add; the direction folds in on the same pass.
+  /// No-op (and does not re-enable) when the shadow is off. Best-effort: a GPU
+  /// reject leaves the previous shadow sun (or none) in place — never crashes.
+  Future<void> _aimShadowLight() async {
+    final viewer = _viewer;
+    if (viewer == null || !_groundShadow) return;
+    try {
+      final old = _shadowLight;
+      _shadowLight = null;
+      if (old != null) await viewer.removeLight(old);
+      final (kx, ky, kz, _) = _kLightRig[0];
+      final dir = groundShadowSunDirection(
+        keyX: kx,
+        keyY: ky,
+        keyZ: kz,
+        azimuth: _lightAzimuth + _envPreset.azimuthBias,
+      );
+      _shadowLight = await viewer.addDirectLight(DirectLight.sun(
+        direction: Vector3(dir.x, dir.y, dir.z),
+        intensity: groundShadowSunIntensity(
+          lightIntensity: _lightIntensity,
+          envIntensityScale: _envPreset.intensityScale,
+        ),
+        castShadows: true,
+      ));
+    } catch (_) {/* keep whatever shadow sun (or none) we had */}
   }
 
   /// Drives the framing from a hand-gesture pose (F4). Maps the controller's
@@ -1194,6 +1414,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
 
   Future<void> _setColor(Color color) async {
     _baseColor = color;
+    _colorPicked = true;
     // Picking a color switches the surface back to flat color (texture off) —
     // baseColorFactor and baseColorMap are mutually exclusive in the UI.
     if (_texEncoded != null) {
@@ -1211,46 +1432,78 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     return Vector3(x * ca + z * sa, y, -x * sa + z * ca)..normalize();
   }
 
-  /// Environment (image-based) lighting amount, 0..1. 0 removes the IBL (the
-  /// directional rig + filmic baseline); >0 loads the bundled studio IBL at a
-  /// proportional intensity for reflections + soft ambient. Best-effort. Call on
-  /// release — (re)loading the KTX isn't free.
-  Future<void> _setEnvironment(double amount) async {
+  /// Applies the lighting environment [env] (Faz C / PO #6): adopts its
+  /// [EnvLightPreset], RE-APPLIES the directional rig so the preset's intensity
+  /// scale / colour temperature / azimuth bias take effect (composed on top of
+  /// the user's sliders), and loads or removes the bundled studio IBL per the
+  /// preset's `iblAmount`. The visible backdrop is a separate Flutter layer
+  /// (EnvironmentBackdrop); this owns only the renderer's lighting.
+  ///
+  /// Best-effort + Adreno-safe: the whole thing is wrapped so a GPU reject
+  /// degrades to the previous lighting rather than crashing. Call on selection
+  /// — (re)loading the KTX + rebuilding the rig isn't free.
+  Future<void> _setEnvironment(AppEnvironment env) async {
     final v = _viewer;
     if (v == null) return;
-    final a = amount.clamp(0.0, 1.0);
+    _envPreset = environmentLightPreset(env);
     try {
-      if (a <= 0.01) {
+      // Re-apply the rig with the new preset (rebuild bakes the intensity scale
+      // + colour temperature; the re-aim folds in the azimuth bias). The
+      // _setLightAzimuth call also re-aims the ground-shadow sun for the new
+      // preset (consistent shadow direction/strength — no-op if shadow off).
+      await _rebuildRig();
+      await _setLightAzimuth(_lightAzimuth);
+      // IBL keyed off the preset's amount (was the old 0..1 slider). loadIbl
+      // replaces any existing IBL (destroyExisting); thermion resolves asset://
+      // via rootBundle. Map amount → a gentle 0..36000 intensity.
+      final ibl = _envPreset.iblAmount;
+      if (ibl <= 0.01) {
         if (_iblLoaded) {
           await v.removeIbl();
           _iblLoaded = false;
         }
       } else {
-        // loadIbl replaces any existing IBL (destroyExisting); thermion resolves
-        // asset:// via rootBundle. Map 0..1 → a gentle 0..36000 intensity.
         await v.loadIbl('asset://assets/env/studio_ibl.ktx',
-            intensity: a * 36000);
+            intensity: ibl * 36000);
         _iblLoaded = true;
       }
     } catch (_) {/* keep the directional rig as the only light */}
   }
 
   /// Re-aims every light for a new rig azimuth (cheap — direction only, no
-  /// re-creation). Live as the angle slider drags.
+  /// re-creation). Live as the angle slider drags. The active environment's
+  /// [EnvLightPreset.azimuthBias] is composed on top of the user's angle so the
+  /// café side-key swing survives a relight.
   Future<void> _setLightAzimuth(double az) async {
     _lightAzimuth = az;
     final v = _viewer;
     if (v == null) return;
     for (var i = 0; i < _lights.length && i < _kLightRig.length; i++) {
       final (x, y, z, _) = _kLightRig[i];
-      await v.setLightDirection(_lights[i], _rotatedDir(x, y, z, az));
+      await v.setLightDirection(
+          _lights[i], _rotatedDir(x, y, z, az + _envPreset.azimuthBias));
     }
+    // Keep the cast shadow consistent with the relit rig (no-op if shadow off).
+    await _aimShadowLight();
   }
 
   /// Re-creates the rig at a new intensity multiplier (Thermion has no runtime
   /// intensity setter, so remove + re-add — lights are cheap). Call on release.
   Future<void> _setLightIntensity(double factor) async {
     _lightIntensity = factor.clamp(0.2, 2.5);
+    await _rebuildRig();
+    // Scale the cast shadow's strength with the rig (no-op if shadow off).
+    await _aimShadowLight();
+  }
+
+  /// Remove + re-add the six-sun rig at the CURRENT user intensity/azimuth
+  /// COMPOSED with the active [_envPreset] (Faz C / PO #6): each sun's intensity
+  /// is `base · userIntensity · preset.intensityScale`, its azimuth is the
+  /// user's angle plus `preset.azimuthBias`, and its colour temperature is the
+  /// preset's (null = neutral). Thermion has no runtime intensity setter, so a
+  /// rebuild is the way to relight; lights are cheap. Used by both the intensity
+  /// slider and the environment picker.
+  Future<void> _rebuildRig() async {
     final v = _viewer;
     if (v == null) return;
     for (final e in _lights) {
@@ -1259,8 +1512,9 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     _lights.clear();
     for (final (x, y, z, inten) in _kLightRig) {
       final e = await v.addDirectLight(DirectLight.sun(
-        direction: _rotatedDir(x, y, z, _lightAzimuth),
-        intensity: inten * _lightIntensity,
+        direction: _rotatedDir(x, y, z, _lightAzimuth + _envPreset.azimuthBias),
+        intensity: inten * _lightIntensity * _envPreset.intensityScale,
+        colorTemperature: _envPreset.colorTemperature,
         castShadows: false,
       ));
       _lights.add(e);
@@ -1558,6 +1812,7 @@ class _PreparedModel {
     required this.centerX,
     required this.centerY,
     required this.centerZ,
+    required this.sizeY,
     required this.camDistance,
     required this.parseMs,
     this.thumbnailRgba,
@@ -1586,6 +1841,10 @@ class _PreparedModel {
   final int vertexCount;
   final int triangleCount;
   final double centerX, centerY, centerZ;
+
+  /// AABB height (maxY − minY) in the file's units. Used to drop the ground
+  /// shadow-catcher at the model's base in world space (see [groundPlaneWorldY]).
+  final double sizeY;
   final double camDistance;
   final int parseMs;
 
@@ -1722,6 +1981,7 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
     centerX: b.centerX,
     centerY: b.centerY,
     centerZ: b.centerZ,
+    sizeY: b.sizeY,
     camDistance: camDistance,
     parseMs: sw.elapsedMilliseconds,
     thumbnailRgba: thumb,

@@ -55,21 +55,21 @@ void main() {
     expect(buf.length, size * size * 4);
   });
 
-  test('background has a vertical gradient (top row lighter than bottom row)',
+  test('background is a radial charcoal pool — brighter toward the focal corner',
       () {
     final buf = rasterCube();
     // The 10% margin guarantees the extreme corners are background, not model.
-    final top = _rgb(buf, size, 0, 0); // top-left corner
-    final bottom = _rgb(buf, size, 0, size - 1); // bottom-left corner
-    // Top is rendered ~8% lighter, bottom ~8% darker than the base bg.
-    expect(top.r, greaterThan(bottom.r), reason: 'gradient R top>bottom');
-    expect(top.g, greaterThan(bottom.g), reason: 'gradient G top>bottom');
-    expect(top.b, greaterThan(bottom.b), reason: 'gradient B top>bottom');
-    // Background stays fully opaque.
+    final tl = _rgb(buf, size, 0, 0); // upper-left, nearest the pool focal
+    final br = _rgb(buf, size, size - 1, size - 1); // far corner, deepest
+    // The "Studio Void" radial pool (focal ~40%/30%) brightens toward the
+    // upper-left and deepens to near-black at the far corner.
+    expect(tl.r, greaterThan(br.r), reason: 'pool brightens toward the focal');
+    expect(tl.g, greaterThan(br.g));
+    expect(tl.b, greaterThan(br.b));
+    // Dark charcoal, fully opaque.
     expect(buf[3], 0xFF);
-    // And brackets the base bg color (top brighter, bottom darker than 0x10/0x14).
-    expect(top.r, greaterThanOrEqualTo(0x10));
-    expect(bottom.r, lessThanOrEqualTo(0x10));
+    expect(tl.r, lessThan(60), reason: 'charcoal pedestal, not a bright bg');
+    expect(br.r, lessThan(40), reason: 'deepens to near-black at the corner');
   });
 
   test('the model is actually drawn (center is a lit surface, not background)',
@@ -95,6 +95,27 @@ void main() {
     }
     // Different cube faces have different normals → different shaded tones.
     expect(tones.length, greaterThan(1));
+  });
+
+  test('chromatic Prism rim — blue fringe left of the model, red fringe right',
+      () {
+    final buf = rasterCube();
+    // The "D" signature: a red chromatic fringe just off the silhouette's right
+    // edge and a blue fringe off the left. Scan for a clearly blue-biased pixel
+    // in the left half and a red-biased one in the right half (the neutral pool
+    // is ~achromatic, the lit model is ~grey, so only the rim trips these).
+    var bluishLeft = false, reddishRight = false;
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        final p = _rgb(buf, size, x, y);
+        if (x < size ~/ 2 && p.b > p.r + 12 && p.b > 28) bluishLeft = true;
+        if (x >= size ~/ 2 && p.r > p.b + 12 && p.r > 28) reddishRight = true;
+      }
+    }
+    expect(bluishLeft, isTrue,
+        reason: 'blue chromatic rim on the left silhouette edge');
+    expect(reddishRight, isTrue,
+        reason: 'red chromatic rim on the right silhouette edge');
   });
 
   test('returns null for an empty mesh', () {

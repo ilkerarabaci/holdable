@@ -52,4 +52,29 @@ void main() {
       expect(i, inInclusiveRange(0, 3));
     }
   });
+
+  // Efe feedback #3: the catcher sits at the model's AABB base in world space,
+  // i.e. -(sizeY/2)·fit — NOT the bounding-sphere radius (which floats it).
+  group('groundPlaneWorldY (catcher at the model base)', () {
+    test('puts the plane at half the scaled height below the origin', () {
+      // A model 2 units tall, fit ×1 → base at y = -1.
+      expect(groundPlaneWorldY(modelSizeY: 2.0, fit: 1.0), -1.0);
+      // Same model scaled down ×0.5 → base at y = -0.5.
+      expect(groundPlaneWorldY(modelSizeY: 2.0, fit: 0.5), -0.5);
+    });
+
+    test('a flat (zero-height) model sits exactly at the origin plane', () {
+      expect(groundPlaneWorldY(modelSizeY: 0.0, fit: 3.0), 0.0);
+    });
+
+    test('a wide/short model bases ABOVE -fitRadius (no float)', () {
+      // A disc-like model: short in Y but its bounding sphere (hence fit) is
+      // driven by the wide X/Z. The base must be well above -1 (the old fixed
+      // -_kFitRadius), proving the object now rests ON the floor.
+      // e.g. sizeY=0.4 scaled by fit=0.5 → -0.1, not -1.0.
+      final y = groundPlaneWorldY(modelSizeY: 0.4, fit: 0.5);
+      expect(y, closeTo(-0.1, 1e-12));
+      expect(y, greaterThan(-1.0));
+    });
+  });
 }

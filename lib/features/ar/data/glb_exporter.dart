@@ -30,7 +30,11 @@ double _srgbToLinear(double c) =>
 /// Builds `.glb` bytes for [mesh]. [name] labels the node. [baseColorArgb]
 /// (0xAARRGGBB, sRGB) overrides the neutral surface colour — used to re-export
 /// a model in its own colour (sRGB is converted to glTF's linear space).
-Uint8List glbFromMesh(MeshData mesh, {String name = 'model', int? baseColorArgb}) {
+/// [opacity] (0..1, default 1) sets the material alpha and switches it to
+/// BLEND below 1, so the viewer's x-ray transparency carries into AR (#10).
+Uint8List glbFromMesh(MeshData mesh,
+    {String name = 'model', int? baseColorArgb, double opacity = 1.0}) {
+  final alpha = opacity.clamp(0.0, 1.0).toDouble();
   final vc = mesh.vertexCount;
   final src = mesh.vertices; // interleaved [px,py,pz, nx,ny,nz, u,v, r,g,b,a]
 
@@ -122,14 +126,17 @@ Uint8List glbFromMesh(MeshData mesh, {String name = 'model', int? baseColorArgb}
       {
         'name': 'surface',
         'doubleSided': true,
+        // BLEND when the user dialed in transparency (x-ray) so the AR loader
+        // renders it see-through; OPAQUE otherwise (#10).
+        'alphaMode': alpha < 1.0 ? 'BLEND' : 'OPAQUE',
         'pbrMetallicRoughness': {
           'baseColorFactor': baseColorArgb == null
-              ? [0.82, 0.82, 0.86, 1.0]
+              ? [0.82, 0.82, 0.86, alpha]
               : [
                   _srgbToLinear(((baseColorArgb >> 16) & 0xFF) / 255),
                   _srgbToLinear(((baseColorArgb >> 8) & 0xFF) / 255),
                   _srgbToLinear((baseColorArgb & 0xFF) / 255),
-                  1.0,
+                  alpha,
                 ],
           'metallicFactor': 0.0,
           'roughnessFactor': 0.75,
