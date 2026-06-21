@@ -14,6 +14,15 @@ import 'package:path_provider/path_provider.dart';
 // material/culling/index enums), vector_math_64 (Vector3, Matrix4) and
 // dart:typed_data. Hide only Material (collides with flutter/material, unused).
 import 'package:thermion_flutter/thermion_flutter.dart' hide Material;
+// Constant-irradiance ambient (option A / black-underside fix): builds an
+// IndirectLight from spherical harmonics with NO cubemap/reflection texture, so
+// the no-IBL environments (None/Café) get a uniform ~0-GPU ambient floor that
+// lifts downward facets out of pure black. There is no public viewer API for a
+// harmonics-only IBL (loadIbl takes a KTX path), so reach the impl factory
+// directly — the dependency is pinned to a git ref, so this stays stable.
+// ignore: implementation_imports, depend_on_referenced_packages
+import 'package:thermion_dart/src/filament/src/implementation/ffi_indirect_light.dart'
+    show FFIIndirectLight;
 
 import '../data/model_parser.dart';
 import '../data/thumbnail_raster.dart';
@@ -171,6 +180,23 @@ const List<(double, double, double, double)> _kLightRig = [
   (0.6, 0.2, 0.5, 18000),
   (-0.1, -0.9, 0.3, 14000),
 ];
+
+/// A zero-texture CONSTANT ambient for the no-IBL presets (None/Café) — the
+/// black-underside fix. Lighting there is purely directional, so a facet that
+/// faces away from every sun crushes to pure black (worst on low-poly solids:
+/// the octahedron's whole underside went black, café/none). A real IBL fixes it
+/// but costs ~70 MB of GPU cubemap; instead we hand Filament a UNIFORM irradiance
+/// built from spherical harmonics with only the DC (band-0) term set — no
+/// reflection/irradiance textures, so it is ~0 MB and lifts EVERY facet evenly
+/// (even the darkest face a real, directional IBL still misses). Filament expects
+/// the 3-band, 27-float coefficient layout; only the first float3 is non-zero for
+/// a constant. [_kAmbientFloorLux] is the (tunable) strength — kept low so it
+/// only lifts the blacks without flattening the directional shading.
+final Float32List _kAmbientSH = Float32List(27)
+  ..[0] = 1.0
+  ..[1] = 1.0
+  ..[2] = 1.0;
+const double _kAmbientFloorLux = 6000.0;
 
 /// The colour to bake into the AR export (Faz D / #10): the user's picked colour
 /// (sRGB 0xAARRGGBB) when they've chosen one and no texture is showing, else null
@@ -562,20 +588,20 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   final List<ThermionEntity> _lights = [];
   double _lightIntensity = 1.0;
   double _lightAzimuth = 0.0;
-  bool _iblLoaded = false; // image-based-lighting environment currently active
   // Lighting environment preset (Faz C / PO #6): composed on top of the user's
   // intensity/azimuth sliders when the rig is (re)built/(re)aimed.
   EnvLightPreset _envPreset = environmentLightPreset(AppEnvironment.none);
 
   // --- Ground/contact shadow (#4). Off by default. The shadow-catcher quad
   // and its dedicated overhead castShadows sun are kept OUT of [_lights] so the
-  // intensity-rig rebuild in _setLightIntensity never drops the shadow light. ---
+  // rig rebuild in _rebuildRig never drops the shadow light. ---
   bool _groundShadow = false;
   ThermionEntity? _shadowLight; // overhead sun that casts the shadow
   ThermionAsset? _groundPlane; // shadow-catcher quad asset
   MaterialInstance? _groundMaterial; // its material — must be destroyed with it
   bool _rebuilding = false;
   String? _pendingMode; // latest mode requested while a rebuild was in flight
+  bool _pendingFrame = false; // a reframe (model change) was queued mid-rebuild
 
   // --- Orbit state: spherical camera around the (panned) model center. ---
   double _azimuth = _isoAzimuth;
@@ -695,6 +721,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       _viewer = viewer;
       _camera = camera;
       _viewerReady = true;
+      // Seed the indirect light for the starting environment (default None →
+      // the zero-GPU constant ambient floor, so the very first model isn't shown
+      // with pure-black undersides before any env is picked).
+      await _applyEnvIbl();
       if (_model != null) await _applyMode(_mode, frame: true);
       // Apply the lens preset (#9) once the camera exists. _applyMode(frame:)
       // re-applies it after framing too; this covers the no-model-yet path.
@@ -785,6 +815,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     if (viewer == null || p == null) return;
     if (_rebuilding) {
       _pendingMode = mode; // apply once the in-flight rebuild finishes
+      if (frame) _pendingFrame = true; // don't lose a model-change reframe
       return;
     }
     _rebuilding = true;
@@ -964,11 +995,15 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     } finally {
       _rebuilding = false;
       final next = _pendingMode;
-      if (next != null && next != _mode) {
-        _pendingMode = null;
-        await _applyMode(next);
-      } else {
-        _pendingMode = null;
+      final pframe = _pendingFrame;
+      _pendingMode = null;
+      _pendingFrame = false;
+      // Re-apply when the mode changed OR a model-change reframe was queued. The
+      // model can change with the SAME mode (Next/Prev) — without the pframe
+      // check that rebuild + reframe would be silently dropped, leaving the new
+      // model un-framed (tiny) in the reused viewer.
+      if (next != null && (next != _mode || pframe)) {
+        await _applyMode(next, frame: pframe);
       }
     }
   }
@@ -1255,7 +1290,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       // Dedicated shadow sun, aimed along the dominant key light so the cast
       // shadow falls AWAY from it (consistent with the rig + environment), at an
       // intensity that tracks the user's brightness. Kept OUT of _lights so
-      // _setLightIntensity's remove/re-add loop can't drop it.
+      // _rebuildRig's remove/re-add loop can't drop it.
       await _aimShadowLight();
       if (_groundPlane == null) {
         // Quad at the model's AABB base in world space — the model is centered
@@ -1410,6 +1445,15 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       textured ? 1.0 : _srgbToLinear(_baseColor.b),
       _currentAlpha,
     );
+    // The gltfio ubershader defaults metallicFactor to 1.0 (glTF default). With
+    // the skybox removed (Faz C) and IBL off by default, a metal has nothing to
+    // reflect → the model renders BLACK (only sharp specular from the directional
+    // rig — the "glossy black car" symptom). Force a dielectric so the rig lights
+    // it diffusely as the neutral colour. metallic/roughness are core PBR params
+    // present in EVERY ubershader variant (baseColorFactor sets fine above), so
+    // this can't hit the missing-parameter native abort (alpha.28 lesson).
+    await mi.setParameterFloat('metallicFactor', 0.0);
+    await mi.setParameterFloat('roughnessFactor', 0.6);
   }
 
   Future<void> _setColor(Color color) async {
@@ -1453,21 +1497,36 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       // preset (consistent shadow direction/strength — no-op if shadow off).
       await _rebuildRig();
       await _setLightAzimuth(_lightAzimuth);
-      // IBL keyed off the preset's amount (was the old 0..1 slider). loadIbl
-      // replaces any existing IBL (destroyExisting); thermion resolves asset://
-      // via rootBundle. Map amount → a gentle 0..36000 intensity.
-      final ibl = _envPreset.iblAmount;
-      if (ibl <= 0.01) {
-        if (_iblLoaded) {
-          await v.removeIbl();
-          _iblLoaded = false;
-        }
-      } else {
-        await v.loadIbl('asset://assets/env/studio_ibl.ktx',
-            intensity: ibl * 36000);
-        _iblLoaded = true;
-      }
+      await _applyEnvIbl();
     } catch (_) {/* keep the directional rig as the only light */}
+  }
+
+  /// Applies the indirect light for the active [_envPreset]. The high-amount
+  /// presets (Sky/Studio) load the bundled studio cubemap IBL; the no-IBL presets
+  /// (None/Café) instead get the zero-texture CONSTANT ambient ([_kAmbientSH]) so
+  /// downward facets are lifted out of pure black without the cubemap's ~70 MB
+  /// GPU cost. Both loadIbl and removeIbl first destroy whatever IBL is already
+  /// in the scene (removeIbl reads it back via getIndirectLight), so switching
+  /// environments never leaks or double-sets. Best-effort + Adreno-safe: a GPU
+  /// reject degrades to the directional rig instead of crashing.
+  Future<void> _applyEnvIbl() async {
+    final v = _viewer;
+    if (v == null) return;
+    try {
+      final amt = _envPreset.iblAmount;
+      if (amt > 0.01) {
+        await v.loadIbl('asset://assets/env/studio_ibl.ktx',
+            intensity: amt * 36000);
+      } else {
+        await v.removeIbl(); // clear+destroy any prior IBL (studio or ambient)
+        final scene = await v.view.getScene();
+        final ambient = await FFIIndirectLight.fromIrradianceHarmonics(
+          _kAmbientSH,
+          intensity: _kAmbientFloorLux,
+        );
+        await scene.setIndirectLight(ambient);
+      }
+    } catch (_) {/* keep the directional rig as the only light — Adreno-safe */}
   }
 
   /// Re-aims every light for a new rig azimuth (cheap — direction only, no
@@ -1487,22 +1546,48 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     await _aimShadowLight();
   }
 
-  /// Re-creates the rig at a new intensity multiplier (Thermion has no runtime
-  /// intensity setter, so remove + re-add — lights are cheap). Call on release.
-  Future<void> _setLightIntensity(double factor) async {
+  /// Applies a new brightness multiplier to the EXISTING rig (and the cast-
+  /// shadow sun) in place via [LightManager.setIntensity] — no remove/re-add,
+  /// so it is cheap enough to drive live while the slider is dragged. (Thermion
+  /// DOES expose a runtime intensity setter; an earlier note here claimed it
+  /// didn't, which forced a needless rig rebuild applied only on release — the
+  /// reason brightness "felt" like it did nothing while dragging.)
+  void _setLightIntensity(double factor) {
     _lightIntensity = factor.clamp(0.2, 2.5);
-    await _rebuildRig();
-    // Scale the cast shadow's strength with the rig (no-op if shadow off).
-    await _aimShadowLight();
+    _applyLiveIntensity();
+  }
+
+  /// Writes [_lightIntensity] (composed with the active env scale) straight to
+  /// every live sun — and the separate ground-shadow sun — through the
+  /// LightManager. Synchronous and allocation-free: safe to call on every drag
+  /// tick. A brightness move never changes the shadow sun's *direction*, so only
+  /// its intensity is updated here (re-aiming stays in [_aimShadowLight]).
+  void _applyLiveIntensity() {
+    final lm = FilamentApp.instance?.lightManager;
+    if (lm == null) return;
+    for (var i = 0; i < _lights.length && i < _kLightRig.length; i++) {
+      final (_, _, _, inten) = _kLightRig[i];
+      lm.setIntensity(
+          _lights[i], inten * _lightIntensity * _envPreset.intensityScale);
+    }
+    final sl = _shadowLight;
+    if (sl != null && _groundShadow) {
+      lm.setIntensity(
+          sl,
+          groundShadowSunIntensity(
+            lightIntensity: _lightIntensity,
+            envIntensityScale: _envPreset.intensityScale,
+          ));
+    }
   }
 
   /// Remove + re-add the six-sun rig at the CURRENT user intensity/azimuth
   /// COMPOSED with the active [_envPreset] (Faz C / PO #6): each sun's intensity
   /// is `base · userIntensity · preset.intensityScale`, its azimuth is the
   /// user's angle plus `preset.azimuthBias`, and its colour temperature is the
-  /// preset's (null = neutral). Thermion has no runtime intensity setter, so a
-  /// rebuild is the way to relight; lights are cheap. Used by both the intensity
-  /// slider and the environment picker.
+  /// preset's (null = neutral). A full rebuild is needed when the colour
+  /// temperature or azimuth-bias change (the environment picker); a pure
+  /// brightness move takes the cheaper in-place [_applyLiveIntensity] path.
   Future<void> _rebuildRig() async {
     final v = _viewer;
     if (v == null) return;
