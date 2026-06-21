@@ -576,6 +576,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   MaterialInstance? _groundMaterial; // its material — must be destroyed with it
   bool _rebuilding = false;
   String? _pendingMode; // latest mode requested while a rebuild was in flight
+  bool _pendingFrame = false; // a reframe (model change) was queued mid-rebuild
 
   // --- Orbit state: spherical camera around the (panned) model center. ---
   double _azimuth = _isoAzimuth;
@@ -785,6 +786,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     if (viewer == null || p == null) return;
     if (_rebuilding) {
       _pendingMode = mode; // apply once the in-flight rebuild finishes
+      if (frame) _pendingFrame = true; // don't lose a model-change reframe
       return;
     }
     _rebuilding = true;
@@ -964,11 +966,15 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     } finally {
       _rebuilding = false;
       final next = _pendingMode;
-      if (next != null && next != _mode) {
-        _pendingMode = null;
-        await _applyMode(next);
-      } else {
-        _pendingMode = null;
+      final pframe = _pendingFrame;
+      _pendingMode = null;
+      _pendingFrame = false;
+      // Re-apply when the mode changed OR a model-change reframe was queued. The
+      // model can change with the SAME mode (Next/Prev) — without the pframe
+      // check that rebuild + reframe would be silently dropped, leaving the new
+      // model un-framed (tiny) in the reused viewer.
+      if (next != null && (next != _mode || pframe)) {
+        await _applyMode(next, frame: pframe);
       }
     }
   }
@@ -1410,6 +1416,15 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       textured ? 1.0 : _srgbToLinear(_baseColor.b),
       _currentAlpha,
     );
+    // The gltfio ubershader defaults metallicFactor to 1.0 (glTF default). With
+    // the skybox removed (Faz C) and IBL off by default, a metal has nothing to
+    // reflect → the model renders BLACK (only sharp specular from the directional
+    // rig — the "glossy black car" symptom). Force a dielectric so the rig lights
+    // it diffusely as the neutral colour. metallic/roughness are core PBR params
+    // present in EVERY ubershader variant (baseColorFactor sets fine above), so
+    // this can't hit the missing-parameter native abort (alpha.28 lesson).
+    await mi.setParameterFloat('metallicFactor', 0.0);
+    await mi.setParameterFloat('roughnessFactor', 0.6);
   }
 
   Future<void> _setColor(Color color) async {
