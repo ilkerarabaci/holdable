@@ -1028,7 +1028,6 @@ class _LightSlider extends StatelessWidget {
     required this.min,
     required this.max,
     required this.onChanged,
-    this.onChangeEnd,
     this.tooltip,
   });
   final IconData icon;
@@ -1036,7 +1035,6 @@ class _LightSlider extends StatelessWidget {
   final double min;
   final double max;
   final ValueChanged<double> onChanged;
-  final ValueChanged<double>? onChangeEnd;
   final String? tooltip;
 
   @override
@@ -1062,7 +1060,6 @@ class _LightSlider extends StatelessWidget {
           min: min,
           max: max,
           onChanged: onChanged,
-          onChangeEnd: onChangeEnd,
         ),
       ),
     ]);
