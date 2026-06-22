@@ -1797,13 +1797,21 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       } else {
         codec = await descriptor.instantiateCodec();
       }
-      descriptor.dispose();
       final frame = await codec.getNextFrame();
       final uiImage = frame.image;
       final w = uiImage.width;
       final h = uiImage.height;
       final bd = await uiImage.toByteData(format: ui.ImageByteFormat.rawRgba);
       uiImage.dispose();
+      // Dispose decode resources only AFTER the frame is fully decoded and its
+      // pixels are copied out (toByteData makes its own copy). Disposing the
+      // descriptor before getNextFrame() frees the encoded SkData while the
+      // io.worker decode thread is still reading it → native use-after-free
+      // (SIGSEGV null-deref in libflutter.so on io.worker). That was the
+      // alpha.61 "5H crashes only sometimes" bug. Teardown in reverse order.
+      codec.dispose();
+      descriptor.dispose();
+      buffer.dispose();
       if (bd == null || w <= 0 || h <= 0) return null;
       final rgba = bd.buffer.asUint8List();
       _trace('createTexture');
