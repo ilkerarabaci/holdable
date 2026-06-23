@@ -1,9 +1,12 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
@@ -189,6 +192,9 @@ class ImportService {
                 onProgress(ImportProgress(ImportPhase.uploading,
                     fraction: sent / total));
               });
+              // Persist now: the Job runs server-side, so a kill/restart from
+              // here on can resume instead of losing the conversion (#4).
+              await _savePending(jobId, name);
               onProgress?.call(const ImportProgress(ImportPhase.converting));
               final status = await svc.awaitJob(jobId);
               if (!status.isDone || status.downloadUrl == null) {
@@ -199,33 +205,114 @@ class ImportService {
             })()
           : await svc.convertToGlb(source.readAsBytesSync(), ext);
 
-      if (_isDuplicate(name, glb.length, ModelFormat.glb) &&
-          !await _confirmReimport(confirmDuplicate, name)) {
-        return ImportResult(ImportStatus.duplicate,
-            message: '"$name" is already in your library.');
-      }
-      final docs = await getApplicationDocumentsDirectory();
-      final modelsDir = Directory('${docs.path}/models');
-      if (!modelsDir.existsSync()) modelsDir.createSync(recursive: true);
-
-      final now = DateTime.now();
-      final id = now.microsecondsSinceEpoch.toString();
-      final dest = '${modelsDir.path}/$id.glb';
-      await File(dest).writeAsBytes(glb);
-
-      final model = LibraryModel(
-        id: id,
-        name: name,
-        format: ModelFormat.glb,
-        sizeBytes: glb.length,
-        filePath: dest,
-        importedAt: now,
-      );
-      await ref.read(libraryControllerProvider.notifier).add(model);
-      return ImportResult(ImportStatus.added, model: model);
+      final result =
+          await _saveGlb(glb, name, confirmDuplicate: confirmDuplicate);
+      await _clearPending(); // resolved — nothing left to resume
+      return result;
     } on ConversionException catch (e) {
+      await _clearPending();
       return ImportResult(ImportStatus.error, message: e.message);
     } catch (e) {
+      await _clearPending();
+      return ImportResult(ImportStatus.error, message: '$e');
+    }
+  }
+
+  /// Writes [glb] as a model named [name] and registers it in the wallet.
+  /// Shared by the conversion import path and the restart-resume path.
+  Future<ImportResult> _saveGlb(Uint8List glb, String name,
+      {Future<bool> Function(String name)? confirmDuplicate}) async {
+    if (_isDuplicate(name, glb.length, ModelFormat.glb) &&
+        !await _confirmReimport(confirmDuplicate, name)) {
+      return ImportResult(ImportStatus.duplicate,
+          message: '"$name" is already in your library.');
+    }
+    final docs = await getApplicationDocumentsDirectory();
+    final modelsDir = Directory('${docs.path}/models');
+    if (!modelsDir.existsSync()) modelsDir.createSync(recursive: true);
+
+    final now = DateTime.now();
+    final id = now.microsecondsSinceEpoch.toString();
+    final dest = '${modelsDir.path}/$id.glb';
+    await File(dest).writeAsBytes(glb);
+
+    final model = LibraryModel(
+      id: id,
+      name: name,
+      format: ModelFormat.glb,
+      sizeBytes: glb.length,
+      filePath: dest,
+      importedAt: now,
+    );
+    await ref.read(libraryControllerProvider.notifier).add(model);
+    return ImportResult(ImportStatus.added, model: model);
+  }
+
+  // --- Restart-resume of an in-flight large conversion (#4) ------------------
+  // The Cloud Run Job runs server-side, independent of the app. Persisting the
+  // jobId while it's in flight lets a kill/restart mid-conversion pick it back
+  // up instead of silently dropping the import.
+  static const String _kPendingKey = 'holdable_pending_conversion_v1';
+
+  Future<void> _savePending(String jobId, String name) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+          _kPendingKey, jsonEncode({'jobId': jobId, 'name': name}));
+    } catch (_) {/* persistence is best-effort */}
+  }
+
+  Future<void> _clearPending() async {
+    try {
+      await (await SharedPreferences.getInstance()).remove(_kPendingKey);
+    } catch (_) {/* best-effort */}
+  }
+
+  /// If a large conversion was still running when the app closed, resume polling
+  /// its Cloud Run Job, download the result and import it. Returns null when
+  /// nothing was pending. Call once on app/library start.
+  Future<ImportResult?> resumePendingConversion({
+    void Function(ImportProgress)? onProgress,
+    Future<bool> Function(String name)? confirmDuplicate,
+  }) async {
+    String? raw;
+    try {
+      raw = (await SharedPreferences.getInstance()).getString(_kPendingKey);
+    } catch (_) {
+      return null;
+    }
+    if (raw == null) return null;
+    String? jobId;
+    var name = 'Model';
+    try {
+      final j = jsonDecode(raw) as Map<String, dynamic>;
+      jobId = j['jobId'] as String?;
+      name = (j['name'] as String?) ?? name;
+    } catch (_) {/* corrupt record — cleared below */}
+    if (jobId == null) {
+      await _clearPending();
+      return null;
+    }
+    const svc = ConversionService();
+    try {
+      onProgress?.call(const ImportProgress(ImportPhase.converting));
+      final status = await svc.awaitJob(jobId);
+      if (!status.isDone || status.downloadUrl == null) {
+        await _clearPending();
+        return ImportResult(ImportStatus.error,
+            message: status.error ?? 'Conversion failed.');
+      }
+      onProgress?.call(const ImportProgress(ImportPhase.downloading));
+      final glb = await svc.downloadJobGlb(status.downloadUrl!);
+      final result =
+          await _saveGlb(glb, name, confirmDuplicate: confirmDuplicate);
+      await _clearPending();
+      return result;
+    } on ConversionException catch (e) {
+      await _clearPending();
+      return ImportResult(ImportStatus.error, message: e.message);
+    } catch (e) {
+      await _clearPending();
       return ImportResult(ImportStatus.error, message: '$e');
     }
   }

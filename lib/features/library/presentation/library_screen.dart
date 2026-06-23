@@ -349,11 +349,57 @@ void _showMaterialBalloon(BuildContext context, LibraryModel model) {
 
 /// Library: empty state when the wallet is empty, otherwise a grid of
 /// liquid-glass model cards. FAB opens the import sheet.
-class LibraryScreen extends ConsumerWidget {
+class LibraryScreen extends ConsumerStatefulWidget {
   const LibraryScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<LibraryScreen> createState() => _LibraryScreenState();
+}
+
+class _LibraryScreenState extends ConsumerState<LibraryScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // #4: if a large conversion was still running when the app last closed, its
+    // Cloud Run Job kept going server-side — resume it now. Post-frame so a
+    // ScaffoldMessenger is available for the progress banner.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _resumePending());
+  }
+
+  Future<void> _resumePending() async {
+    if (!mounted) return;
+    final progress = ValueNotifier<ImportProgress?>(null);
+    final result =
+        await ref.read(importServiceProvider).resumePendingConversion(
+      onProgress: (p) {
+        if (progress.value == null && mounted) {
+          _showConvertingBanner(context, progress);
+        }
+        progress.value = p;
+      },
+      confirmDuplicate: (name) => _confirmDuplicate(context, name),
+    );
+    if (result == null || !mounted) return; // nothing was pending
+    final messenger = ScaffoldMessenger.of(context)..clearSnackBars();
+    switch (result.status) {
+      case ImportStatus.added:
+        _showMaterialBalloon(context, result.model!);
+      case ImportStatus.duplicate:
+        messenger.showSnackBar(
+          SnackBar(content: Text(result.message ?? 'Already in your library')),
+        );
+      case ImportStatus.error:
+        messenger.showSnackBar(
+          SnackBar(content: Text(result.message ?? 'Import failed')),
+        );
+      case ImportStatus.cancelled:
+      case ImportStatus.unsupported:
+        break;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final models = ref.watch(libraryControllerProvider);
     final mode = ref.watch(themeControllerProvider);
     final isDark = mode == ThemeMode.dark;
