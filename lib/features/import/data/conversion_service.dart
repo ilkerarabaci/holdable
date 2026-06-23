@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:meta/meta.dart';
+
 /// Extensions Holdable can't parse natively but the conversion service can turn
 /// into glb (headless Blender / FreeCAD). Distinct from [ModelFormat], which is
 /// the set we read directly.
@@ -82,7 +84,7 @@ ConversionException _httpError(int code) {
 /// Run cold start (the heavy Blender container spinning up from zero instances)
 /// can take well over 15s to accept a connection — the likely cause of the
 /// "service unreachable" failures when the service has scaled to zero. Pairs
-/// with [_retryTransient] so a cold first request recovers instead of failing.
+/// with [retryTransient] so a cold first request recovers instead of failing.
 const Duration _kConnectTimeout = Duration(seconds: 45);
 
 /// Response timeout for the small control requests (sign-url, enqueue, poll) —
@@ -102,8 +104,10 @@ bool _isRetryableStatus(int code) => code == 502 || code == 503;
 /// 5xx — backing off 1s → 3s → 9s. Wrap ONLY idempotent, cheap requests (the
 /// first-contact control calls + polling); NEVER the big upload PUT, since
 /// re-running it would re-upload hundreds of MB.
-Future<T> _retryTransient<T>(Future<T> Function() op, {int tries = 3}) async {
-  var delay = const Duration(seconds: 1);
+@visibleForTesting
+Future<T> retryTransient<T>(Future<T> Function() op,
+    {int tries = 3, Duration firstDelay = const Duration(seconds: 1)}) async {
+  var delay = firstDelay;
   for (var attempt = 1; ; attempt++) {
     try {
       return await op();
@@ -171,7 +175,7 @@ class ConversionService {
       // First contact — retried, since a cold/scaled-to-zero service most often
       // fails right here (this is the request the user hit yesterday when the
       // import "couldn't upload").
-      final signed = await _retryTransient(() async {
+      final signed = await retryTransient(() async {
         final urlReq = await client
             .postUrl(Uri.parse('$kConversionBaseUrl/jobs/upload-url?ext=$e'));
         final urlResp = await urlReq.close().timeout(_kCtlTimeout);
@@ -221,7 +225,7 @@ class ConversionService {
   Future<JobStatus> pollJob(String jobId) async {
     final client = HttpClient()..connectionTimeout = _kConnectTimeout;
     try {
-      return await _retryTransient(() async {
+      return await retryTransient(() async {
         final req =
             await client.getUrl(Uri.parse('$kConversionBaseUrl/jobs/$jobId'));
         final resp = await req.close().timeout(_kCtlTimeout);
