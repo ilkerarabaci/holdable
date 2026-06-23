@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -77,6 +78,51 @@ ConversionException _httpError(int code) {
   return ConversionException('Conversion failed (HTTP $code).');
 }
 
+/// Connection timeout for the conversion endpoints. Bumped from 15s: a Cloud
+/// Run cold start (the heavy Blender container spinning up from zero instances)
+/// can take well over 15s to accept a connection — the likely cause of the
+/// "service unreachable" failures when the service has scaled to zero. Pairs
+/// with [_retryTransient] so a cold first request recovers instead of failing.
+const Duration _kConnectTimeout = Duration(seconds: 45);
+
+/// Response timeout for the small control requests (sign-url, enqueue, poll) —
+/// also generous enough to ride out a cold start.
+const Duration _kCtlTimeout = Duration(seconds: 45);
+
+/// Internal marker for an HTTP status worth retrying (Cloud Run cold-start /
+/// transient gateway errors). Never surfaced to the user.
+class _TransientHttp implements Exception {
+  const _TransientHttp(this.code);
+  final int code;
+}
+
+bool _isRetryableStatus(int code) => code == 502 || code == 503;
+
+/// Retries [op] on transient failures — network blips and Cloud Run cold-start
+/// 5xx — backing off 1s → 3s → 9s. Wrap ONLY idempotent, cheap requests (the
+/// first-contact control calls + polling); NEVER the big upload PUT, since
+/// re-running it would re-upload hundreds of MB.
+Future<T> _retryTransient<T>(Future<T> Function() op, {int tries = 3}) async {
+  var delay = const Duration(seconds: 1);
+  for (var attempt = 1; ; attempt++) {
+    try {
+      return await op();
+    } on _TransientHttp catch (e) {
+      if (attempt >= tries) throw _httpError(e.code);
+    } on SocketException {
+      if (attempt >= tries) rethrow; // callers map this to "unreachable"
+    } on TimeoutException {
+      if (attempt >= tries) {
+        throw ConversionException(
+            'The conversion service took too long to respond — it may be '
+            'starting up. Please try again in a moment.');
+      }
+    }
+    await Future<void>.delayed(delay);
+    delay *= 3;
+  }
+}
+
 /// State of an async (over-the-sync-cap) conversion job, polled from
 /// `GET /jobs/<id>`. Big files convert in a Cloud Run Job, not in-request.
 class JobStatus {
@@ -120,14 +166,22 @@ class ConversionService {
   /// [awaitJob]. Use when the file is too big for the synchronous path.
   Future<String> enqueueLargeConversion(File file, String ext) async {
     final e = ext.toLowerCase().replaceAll('.', '');
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    final client = HttpClient()..connectionTimeout = _kConnectTimeout;
     try {
-      final urlReq = await client
-          .postUrl(Uri.parse('$kConversionBaseUrl/jobs/upload-url?ext=$e'));
-      final urlResp = await urlReq.close().timeout(const Duration(seconds: 30));
-      final urlBody = await _collectString(urlResp);
-      if (urlResp.statusCode != 200) throw _httpError(urlResp.statusCode);
-      final signed = jsonDecode(urlBody) as Map<String, dynamic>;
+      // First contact — retried, since a cold/scaled-to-zero service most often
+      // fails right here (this is the request the user hit yesterday when the
+      // import "couldn't upload").
+      final signed = await _retryTransient(() async {
+        final urlReq = await client
+            .postUrl(Uri.parse('$kConversionBaseUrl/jobs/upload-url?ext=$e'));
+        final urlResp = await urlReq.close().timeout(_kCtlTimeout);
+        final urlBody = await _collectString(urlResp);
+        if (_isRetryableStatus(urlResp.statusCode)) {
+          throw _TransientHttp(urlResp.statusCode);
+        }
+        if (urlResp.statusCode != 200) throw _httpError(urlResp.statusCode);
+        return jsonDecode(urlBody) as Map<String, dynamic>;
+      });
       final jobId = signed['jobId'] as String?;
       final uploadUrl = signed['uploadUrl'] as String?;
       if (jobId == null || uploadUrl == null) {
@@ -165,14 +219,19 @@ class ConversionService {
 
   /// Polls a job once.
   Future<JobStatus> pollJob(String jobId) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    final client = HttpClient()..connectionTimeout = _kConnectTimeout;
     try {
-      final req =
-          await client.getUrl(Uri.parse('$kConversionBaseUrl/jobs/$jobId'));
-      final resp = await req.close().timeout(const Duration(seconds: 30));
-      final body = await _collectString(resp);
-      if (resp.statusCode != 200) throw _httpError(resp.statusCode);
-      return JobStatus.fromJson(jsonDecode(body) as Map<String, dynamic>);
+      return await _retryTransient(() async {
+        final req =
+            await client.getUrl(Uri.parse('$kConversionBaseUrl/jobs/$jobId'));
+        final resp = await req.close().timeout(_kCtlTimeout);
+        final body = await _collectString(resp);
+        if (_isRetryableStatus(resp.statusCode)) {
+          throw _TransientHttp(resp.statusCode);
+        }
+        if (resp.statusCode != 200) throw _httpError(resp.statusCode);
+        return JobStatus.fromJson(jsonDecode(body) as Map<String, dynamic>);
+      });
     } on SocketException {
       throw ConversionException('Conversion service unreachable.');
     } finally {
@@ -202,7 +261,7 @@ class ConversionService {
 
   /// Downloads the finished glb from a completed job's signed [downloadUrl].
   Future<Uint8List> downloadJobGlb(String downloadUrl) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    final client = HttpClient()..connectionTimeout = _kConnectTimeout;
     try {
       return await _downloadGlb(client, downloadUrl);
     } finally {
@@ -213,7 +272,7 @@ class ConversionService {
   /// Small files: POST the raw bytes to /convert and stream back the glb.
   Future<Uint8List> _convertDirect(Uint8List bytes, String e) async {
     final uri = Uri.parse('$kConversionBaseUrl/convert?ext=$e');
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    final client = HttpClient()..connectionTimeout = _kConnectTimeout;
     try {
       final req = await client.postUrl(uri);
       req.headers.set(HttpHeaders.contentTypeHeader, 'application/octet-stream');
@@ -237,7 +296,7 @@ class ConversionService {
   /// limit), then ask the service to convert the uploaded object. The result
   /// comes back inline (small glb) or as a signed download URL (large glb).
   Future<Uint8List> _convertViaGcs(Uint8List bytes, String e) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    final client = HttpClient()..connectionTimeout = _kConnectTimeout;
     try {
       // 1) Ask for a signed upload URL.
       final urlReq =
