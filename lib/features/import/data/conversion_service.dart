@@ -3,8 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:meta/meta.dart';
-
 /// Extensions Holdable can't parse natively but the conversion service can turn
 /// into glb (headless Blender / FreeCAD). Distinct from [ModelFormat], which is
 /// the set we read directly.
@@ -104,7 +102,8 @@ bool _isRetryableStatus(int code) => code == 502 || code == 503;
 /// 5xx — backing off 1s → 3s → 9s. Wrap ONLY idempotent, cheap requests (the
 /// first-contact control calls + polling); NEVER the big upload PUT, since
 /// re-running it would re-upload hundreds of MB.
-@visibleForTesting
+///
+/// Public (not `_`-prefixed) only so the unit tests can drive it directly.
 Future<T> retryTransient<T>(Future<T> Function() op,
     {int tries = 3, Duration firstDelay = const Duration(seconds: 1)}) async {
   var delay = firstDelay;
