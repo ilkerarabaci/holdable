@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -186,58 +187,116 @@ Future<bool> _confirmDuplicate(BuildContext context, String name) async {
 void _showConvertingBanner(
     BuildContext context, ValueNotifier<ImportProgress?> progress) {
   final c = context.prism;
-  final t = Theme.of(context).textTheme;
   ScaffoldMessenger.of(context)
     ..clearSnackBars()
     ..showSnackBar(
       SnackBar(
         backgroundColor: c.surface,
         behavior: SnackBarBehavior.floating,
-        duration: const Duration(minutes: 10),
+        // Match the job poll window (awaitJob, 30 min) so the banner doesn't
+        // vanish mid-conversion on a slow, export-bound model.
+        duration: const Duration(minutes: 30),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(14),
           side: BorderSide(color: c.borderHairline),
         ),
-        content: ValueListenableBuilder<ImportProgress?>(
-          valueListenable: progress,
-          builder: (context, p, _) {
-            final phase = p?.phase ?? ImportPhase.uploading;
-            final pct = (phase == ImportPhase.uploading && p?.fraction != null)
-                ? (p!.fraction! * 100).round()
-                : null;
-            final label = switch (phase) {
-              ImportPhase.uploading =>
-                pct != null ? 'Uploading $pct%' : 'Uploading…',
-              ImportPhase.converting => 'Converting in the cloud…',
-              ImportPhase.downloading => 'Downloading…',
-            };
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '$label — you can keep using Holdable.',
-                  style: t.bodyMedium?.copyWith(color: c.textPrimary),
-                ),
-                const SizedBox(height: 10),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    // Determinate while uploading; indeterminate once the file
-                    // is in the cloud (the Job's internal % isn't observable).
-                    value: phase == ImportPhase.uploading ? p?.fraction : null,
-                    minHeight: 4,
-                    backgroundColor: c.borderHairline,
-                    valueColor: const AlwaysStoppedAnimation<Color>(
-                        PrismGradient.violet),
-                  ),
-                ),
-              ],
-            );
-          },
-        ),
+        content: _ConvertingBannerContent(progress: progress),
       ),
     );
+}
+
+/// Banner body. Stateful so it can tick an elapsed clock once per second during
+/// the cloud convert/download phases: those report no sub-progress, so without
+/// a clock the banner sits on a static "Converting…" for minutes on a dense,
+/// export-bound model — which reads as frozen. The upload phase still shows the
+/// live %; the clock makes the long cloud phase visibly alive.
+class _ConvertingBannerContent extends StatefulWidget {
+  const _ConvertingBannerContent({required this.progress});
+  final ValueNotifier<ImportProgress?> progress;
+
+  @override
+  State<_ConvertingBannerContent> createState() =>
+      _ConvertingBannerContentState();
+}
+
+class _ConvertingBannerContentState extends State<_ConvertingBannerContent> {
+  final Stopwatch _elapsed = Stopwatch()..start();
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.progress.addListener(_onChange);
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  void _onChange() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    widget.progress.removeListener(_onChange);
+    _ticker?.cancel();
+    _elapsed.stop();
+    super.dispose();
+  }
+
+  String get _clock {
+    final s = _elapsed.elapsed.inSeconds;
+    return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.prism;
+    final t = Theme.of(context).textTheme;
+    final p = widget.progress.value;
+    final phase = p?.phase ?? ImportPhase.uploading;
+    final pct = (phase == ImportPhase.uploading && p?.fraction != null)
+        ? (p!.fraction! * 100).round()
+        : null;
+    final inCloud = phase != ImportPhase.uploading;
+    final label = switch (phase) {
+      ImportPhase.uploading => pct != null ? 'Uploading $pct%' : 'Uploading…',
+      ImportPhase.converting => 'Converting in the cloud… · $_clock',
+      ImportPhase.downloading => 'Downloading…',
+    };
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '$label — you can keep using Holdable.',
+          style: t.bodyMedium?.copyWith(color: c.textPrimary),
+        ),
+        // After a minute on the cloud phase, set expectations: dense models are
+        // export-bound and can genuinely take a few minutes.
+        if (inCloud && _elapsed.elapsed.inSeconds >= 60) ...[
+          const SizedBox(height: 2),
+          Text(
+            'Detailed models can take a few minutes.',
+            style: t.labelSmall?.copyWith(color: c.textMuted),
+          ),
+        ],
+        const SizedBox(height: 10),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: LinearProgressIndicator(
+            // Determinate while uploading; indeterminate once the file is in the
+            // cloud (the Job's internal % isn't observable).
+            value: phase == ImportPhase.uploading ? p?.fraction : null,
+            minHeight: 4,
+            backgroundColor: c.borderHairline,
+            valueColor:
+                const AlwaysStoppedAnimation<Color>(PrismGradient.violet),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 /// PO #7 — after an import, tell the user how much of the model's appearance
