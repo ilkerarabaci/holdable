@@ -184,7 +184,7 @@ Future<bool> _confirmDuplicate(BuildContext context, String name) async {
 /// the upload (the bulk of the wait), then indeterminate for the cloud
 /// convert/download phases. Cleared when the import resolves (see _runImport).
 void _showConvertingBanner(
-    BuildContext context, ValueListenable<ImportProgress?> progress) {
+    BuildContext context, ValueNotifier<ImportProgress?> progress) {
   final c = context.prism;
   final t = Theme.of(context).textTheme;
   ScaffoldMessenger.of(context)
