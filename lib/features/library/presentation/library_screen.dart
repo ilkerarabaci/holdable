@@ -12,6 +12,7 @@ import '../../../app/theme/prism_colors.dart';
 import '../../../app/theme/prism_gradient.dart';
 import '../../../app/theme_controller.dart';
 import '../../../shared/utils/format.dart';
+import '../../import/data/conversion_service.dart';
 import '../../import/data/import_service.dart';
 import '../../import/data/sample_models.dart';
 import '../../import/domain/material_support.dart';
@@ -81,12 +82,14 @@ Future<void> _runImport(BuildContext context, WidgetRef ref) async {
   // Only conversions emit progress, so the banner is raised lazily on the
   // first event — a plain native-format import shows no banner.
   final progress = ValueNotifier<ImportProgress?>(null);
+  final cancel = CancelToken();
   final result = await ref.read(importServiceProvider).pickAndImport(
         confirmOversize: (size) => _confirmOversize(context, size),
         confirmDuplicate: (name) => _confirmDuplicate(context, name),
+        cancel: cancel,
         onProgress: (p) {
           if (progress.value == null && context.mounted) {
-            _showConvertingBanner(context, progress);
+            _showConvertingBanner(context, progress, onCancel: cancel.cancel);
           }
           progress.value = p;
         },
@@ -185,7 +188,8 @@ Future<bool> _confirmDuplicate(BuildContext context, String name) async {
 /// the upload (the bulk of the wait), then indeterminate for the cloud
 /// convert/download phases. Cleared when the import resolves (see _runImport).
 void _showConvertingBanner(
-    BuildContext context, ValueNotifier<ImportProgress?> progress) {
+    BuildContext context, ValueNotifier<ImportProgress?> progress,
+    {VoidCallback? onCancel}) {
   final c = context.prism;
   ScaffoldMessenger.of(context)
     ..clearSnackBars()
@@ -200,7 +204,8 @@ void _showConvertingBanner(
           borderRadius: BorderRadius.circular(14),
           side: BorderSide(color: c.borderHairline),
         ),
-        content: _ConvertingBannerContent(progress: progress),
+        content:
+            _ConvertingBannerContent(progress: progress, onCancel: onCancel),
       ),
     );
 }
@@ -211,8 +216,9 @@ void _showConvertingBanner(
 /// export-bound model — which reads as frozen. The upload phase still shows the
 /// live %; the clock makes the long cloud phase visibly alive.
 class _ConvertingBannerContent extends StatefulWidget {
-  const _ConvertingBannerContent({required this.progress});
+  const _ConvertingBannerContent({required this.progress, this.onCancel});
   final ValueNotifier<ImportProgress?> progress;
+  final VoidCallback? onCancel;
 
   @override
   State<_ConvertingBannerContent> createState() =>
@@ -268,9 +274,28 @@ class _ConvertingBannerContentState extends State<_ConvertingBannerContent> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          '$label — you can keep using Holdable.',
-          style: t.bodyMedium?.copyWith(color: c.textPrimary),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '$label — you can keep using Holdable.',
+                style: t.bodyMedium?.copyWith(color: c.textPrimary),
+              ),
+            ),
+            if (widget.onCancel != null)
+              TextButton(
+                onPressed: widget.onCancel,
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: const Size(0, 32),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: Text(
+                  'Cancel',
+                  style: t.labelLarge?.copyWith(color: PrismGradient.violet),
+                ),
+              ),
+          ],
         ),
         // After a minute on the cloud phase, set expectations: dense models are
         // export-bound and can genuinely take a few minutes.

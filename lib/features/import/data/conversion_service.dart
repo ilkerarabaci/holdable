@@ -148,6 +148,38 @@ class JobStatus {
       );
 }
 
+/// Cooperative cancellation for an in-flight conversion. The UI holds one and
+/// calls [cancel] from the banner's Cancel action; the transport closes its
+/// HttpClient (aborting the in-flight upload/poll/download) so the import
+/// resolves promptly as cancelled instead of running the upload to completion.
+class CancelToken {
+  bool _cancelled = false;
+  final List<void Function()> _onCancel = [];
+
+  bool get isCancelled => _cancelled;
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    for (final cb in List.of(_onCancel)) {
+      cb();
+    }
+    _onCancel.clear();
+  }
+
+  /// Runs [cb] when cancelled — immediately if cancellation already happened.
+  void onCancel(void Function() cb) {
+    if (_cancelled) {
+      cb();
+    } else {
+      _onCancel.add(cb);
+    }
+  }
+}
+
+/// Thrown when an in-flight conversion is cancelled by the user.
+class CancelledException implements Exception {}
+
 /// Uploads an unsupported model to the conversion service and gets back glb
 /// bytes. Pure transport — the caller persists/imports the result.
 class ConversionService {
@@ -168,9 +200,13 @@ class ConversionService {
   /// MB), then starts the Cloud Run Job. Returns the job id to poll with
   /// [awaitJob]. Use when the file is too big for the synchronous path.
   Future<String> enqueueLargeConversion(File file, String ext,
-      {void Function(int sent, int total)? onUploadProgress}) async {
+      {void Function(int sent, int total)? onUploadProgress,
+      CancelToken? cancel}) async {
     final e = ext.toLowerCase().replaceAll('.', '');
     final client = HttpClient()..connectionTimeout = _kConnectTimeout;
+    // Cancel aborts the in-flight upload by force-closing the client; the
+    // import layer maps the resulting error to ImportStatus.cancelled.
+    cancel?.onCancel(() => client.close(force: true));
     try {
       // First contact — retried, since a cold/scaled-to-zero service most often
       // fails right here (this is the request the user hit yesterday when the
@@ -253,10 +289,12 @@ class ConversionService {
   /// Polls until the job is done/failed or [maxWait] elapses (backing off
   /// 3s → 12s). Throws if it's still running past the deadline.
   Future<JobStatus> awaitJob(String jobId,
-      {Duration maxWait = const Duration(minutes: 30)}) async {
+      {Duration maxWait = const Duration(minutes: 30),
+      CancelToken? cancel}) async {
     final deadline = DateTime.now().add(maxWait);
     var delay = const Duration(seconds: 3);
     while (true) {
+      if (cancel?.isCancelled ?? false) throw CancelledException();
       final s = await pollJob(jobId);
       if (s.isTerminal) return s;
       if (DateTime.now().isAfter(deadline)) {
@@ -271,8 +309,10 @@ class ConversionService {
   }
 
   /// Downloads the finished glb from a completed job's signed [downloadUrl].
-  Future<Uint8List> downloadJobGlb(String downloadUrl) async {
+  Future<Uint8List> downloadJobGlb(String downloadUrl,
+      {CancelToken? cancel}) async {
     final client = HttpClient()..connectionTimeout = _kConnectTimeout;
+    cancel?.onCancel(() => client.close(force: true));
     try {
       return await _downloadGlb(client, downloadUrl);
     } finally {

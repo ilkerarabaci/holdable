@@ -55,6 +55,7 @@ class ImportService {
     Future<bool> Function(int sizeBytes)? confirmOversize,
     Future<bool> Function(String name)? confirmDuplicate,
     void Function(ImportProgress)? onProgress,
+    CancelToken? cancel,
   }) async {
     final FilePickerResult? result;
     try {
@@ -85,7 +86,8 @@ class ImportService {
         displayName: picked.name,
         size: picked.size,
         confirmDuplicate: confirmDuplicate,
-        onProgress: onProgress);
+        onProgress: onProgress,
+        cancel: cancel);
   }
 
   /// Copies the file at [path] into app storage and registers it. Used by both
@@ -94,7 +96,8 @@ class ImportService {
       {String? displayName,
       int? size,
       Future<bool> Function(String name)? confirmDuplicate,
-      void Function(ImportProgress)? onProgress}) async {
+      void Function(ImportProgress)? onProgress,
+      CancelToken? cancel}) async {
     final format = ModelFormat.fromExtension(_ext(path));
     if (format == null) {
       // Not natively parseable — but if it's a convertible format (.blend,
@@ -104,7 +107,8 @@ class ImportService {
         return _importViaConversion(path, ext,
             displayName: displayName,
             confirmDuplicate: confirmDuplicate,
-            onProgress: onProgress);
+            onProgress: onProgress,
+            cancel: cancel);
       }
       if (kUnsupportedCadExtensions.contains(ext)) {
         return ImportResult(ImportStatus.unsupported,
@@ -158,7 +162,8 @@ class ImportService {
   Future<ImportResult> _importViaConversion(String path, String ext,
       {String? displayName,
       Future<bool> Function(String name)? confirmDuplicate,
-      void Function(ImportProgress)? onProgress}) async {
+      void Function(ImportProgress)? onProgress,
+      CancelToken? cancel}) async {
     try {
       final source = File(path);
       final name =
@@ -184,6 +189,7 @@ class ImportService {
                   ?.call(const ImportProgress(ImportPhase.uploading, fraction: 0));
               var lastPct = -1;
               final jobId = await svc.enqueueLargeConversion(source, ext,
+                  cancel: cancel,
                   onUploadProgress: (sent, total) {
                 if (total <= 0 || onProgress == null) return;
                 final pct = sent * 100 ~/ total;
@@ -196,12 +202,12 @@ class ImportService {
               // here on can resume instead of losing the conversion (#4).
               await _savePending(jobId, name);
               onProgress?.call(const ImportProgress(ImportPhase.converting));
-              final status = await svc.awaitJob(jobId);
+              final status = await svc.awaitJob(jobId, cancel: cancel);
               if (!status.isDone || status.downloadUrl == null) {
                 throw ConversionException(status.error ?? 'Conversion failed.');
               }
               onProgress?.call(const ImportProgress(ImportPhase.downloading));
-              return svc.downloadJobGlb(status.downloadUrl!);
+              return svc.downloadJobGlb(status.downloadUrl!, cancel: cancel);
             })()
           : await svc.convertToGlb(source.readAsBytesSync(), ext);
 
@@ -209,11 +215,22 @@ class ImportService {
           await _saveGlb(glb, name, confirmDuplicate: confirmDuplicate);
       await _clearPending(); // resolved — nothing left to resume
       return result;
+    } on CancelledException {
+      await _clearPending();
+      return const ImportResult(ImportStatus.cancelled);
     } on ConversionException catch (e) {
       await _clearPending();
+      // A force-closed client (cancel) surfaces as a transport error — classify
+      // it as a cancellation, not a failure, when the token says so.
+      if (cancel?.isCancelled ?? false) {
+        return const ImportResult(ImportStatus.cancelled);
+      }
       return ImportResult(ImportStatus.error, message: e.message);
     } catch (e) {
       await _clearPending();
+      if (cancel?.isCancelled ?? false) {
+        return const ImportResult(ImportStatus.cancelled);
+      }
       return ImportResult(ImportStatus.error, message: '$e');
     }
   }
