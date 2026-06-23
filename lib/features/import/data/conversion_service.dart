@@ -167,7 +167,8 @@ class ConversionService {
   /// the file straight to GCS (never buffering it in RAM — it can be hundreds of
   /// MB), then starts the Cloud Run Job. Returns the job id to poll with
   /// [awaitJob]. Use when the file is too big for the synchronous path.
-  Future<String> enqueueLargeConversion(File file, String ext) async {
+  Future<String> enqueueLargeConversion(File file, String ext,
+      {void Function(int sent, int total)? onUploadProgress}) async {
     final e = ext.toLowerCase().replaceAll('.', '');
     final client = HttpClient()..connectionTimeout = _kConnectTimeout;
     try {
@@ -196,7 +197,14 @@ class ConversionService {
       putReq.headers
           .set(HttpHeaders.contentTypeHeader, 'application/octet-stream');
       putReq.contentLength = len;
-      await putReq.addStream(file.openRead());
+      // Report upload progress as the file streams from disk (this is ~84% of
+      // the total import time for a big model — surfaced as a % in the banner).
+      var sent = 0;
+      await putReq.addStream(file.openRead().map((chunk) {
+        sent += chunk.length;
+        onUploadProgress?.call(sent, len);
+        return chunk;
+      }));
       final putResp = await putReq.close().timeout(const Duration(minutes: 15));
       await _drain(putResp);
       if (putResp.statusCode != 200) {

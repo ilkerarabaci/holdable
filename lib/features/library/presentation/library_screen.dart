@@ -76,13 +76,22 @@ Future<void> _pickSample(BuildContext context, WidgetRef ref) async {
 /// Runs the file-picker import and shows feedback. Shared by the FAB and the
 /// import sheet's "Files" row.
 Future<void> _runImport(BuildContext context, WidgetRef ref) async {
+  // Drives the converting banner's live progress (upload % → cloud phases).
+  // Only conversions emit progress, so the banner is raised lazily on the
+  // first event — a plain native-format import shows no banner.
+  final progress = ValueNotifier<ImportProgress?>(null);
   final result = await ref.read(importServiceProvider).pickAndImport(
         confirmOversize: (size) => _confirmOversize(context, size),
         confirmDuplicate: (name) => _confirmDuplicate(context, name),
-        onConverting: () => _showConvertingBanner(context),
+        onProgress: (p) {
+          if (progress.value == null && context.mounted) {
+            _showConvertingBanner(context, progress);
+          }
+          progress.value = p;
+        },
       );
   if (!context.mounted) return;
-  // Clear any "converting…" banner before showing the final result.
+  // Clear the progress banner before showing the final result.
   final messenger = ScaffoldMessenger.of(context)..clearSnackBars();
   switch (result.status) {
     case ImportStatus.added:
@@ -170,9 +179,12 @@ Future<bool> _confirmDuplicate(BuildContext context, String name) async {
   return ok ?? false;
 }
 
-/// Persistent banner while a large file converts in the cloud (async Job path,
-/// >200 MB). Cleared when the import resolves (see _runImport).
-void _showConvertingBanner(BuildContext context) {
+/// Persistent banner while a large file converts in the cloud (async Job path).
+/// Shows live progress driven by [progress]: a determinate bar with % during
+/// the upload (the bulk of the wait), then indeterminate for the cloud
+/// convert/download phases. Cleared when the import resolves (see _runImport).
+void _showConvertingBanner(
+    BuildContext context, ValueListenable<ImportProgress?> progress) {
   final c = context.prism;
   final t = Theme.of(context).textTheme;
   ScaffoldMessenger.of(context)
@@ -186,25 +198,43 @@ void _showConvertingBanner(BuildContext context) {
           borderRadius: BorderRadius.circular(14),
           side: BorderSide(color: c.borderHairline),
         ),
-        content: Row(
-          children: [
-            SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                valueColor:
-                    const AlwaysStoppedAnimation<Color>(PrismGradient.violet),
-              ),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Text(
-                'Converting your file in the cloud — you can keep using Holdable.',
-                style: t.bodyMedium?.copyWith(color: c.textPrimary),
-              ),
-            ),
-          ],
+        content: ValueListenableBuilder<ImportProgress?>(
+          valueListenable: progress,
+          builder: (context, p, _) {
+            final phase = p?.phase ?? ImportPhase.uploading;
+            final pct = (phase == ImportPhase.uploading && p?.fraction != null)
+                ? (p!.fraction! * 100).round()
+                : null;
+            final label = switch (phase) {
+              ImportPhase.uploading =>
+                pct != null ? 'Uploading $pct%' : 'Uploading…',
+              ImportPhase.converting => 'Converting in the cloud…',
+              ImportPhase.downloading => 'Downloading…',
+            };
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '$label — you can keep using Holdable.',
+                  style: t.bodyMedium?.copyWith(color: c.textPrimary),
+                ),
+                const SizedBox(height: 10),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    // Determinate while uploading; indeterminate once the file
+                    // is in the cloud (the Job's internal % isn't observable).
+                    value: phase == ImportPhase.uploading ? p?.fraction : null,
+                    minHeight: 4,
+                    backgroundColor: c.borderHairline,
+                    valueColor: const AlwaysStoppedAnimation<Color>(
+                        PrismGradient.violet),
+                  ),
+                ),
+              ],
+            );
+          },
         ),
       ),
     );

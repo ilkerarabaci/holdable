@@ -19,6 +19,19 @@ class ImportResult {
   final String? message;
 }
 
+/// Phase of an in-flight import that needs cloud conversion (the async Job
+/// path), surfaced to the UI so it can show real progress instead of an
+/// indeterminate spinner.
+enum ImportPhase { uploading, converting, downloading }
+
+class ImportProgress {
+  const ImportProgress(this.phase, {this.fraction});
+  final ImportPhase phase;
+
+  /// 0..1 during [ImportPhase.uploading]; null = indeterminate (cloud phases).
+  final double? fraction;
+}
+
 /// Imports models into the wallet. Two entry points share one copy-and-register
 /// core: the file picker ([pickAndImport]) and incoming shares ([importPath]).
 /// Alpha = local-only.
@@ -38,7 +51,7 @@ class ImportService {
   Future<ImportResult> pickAndImport({
     Future<bool> Function(int sizeBytes)? confirmOversize,
     Future<bool> Function(String name)? confirmDuplicate,
-    void Function()? onConverting,
+    void Function(ImportProgress)? onProgress,
   }) async {
     final FilePickerResult? result;
     try {
@@ -69,7 +82,7 @@ class ImportService {
         displayName: picked.name,
         size: picked.size,
         confirmDuplicate: confirmDuplicate,
-        onConverting: onConverting);
+        onProgress: onProgress);
   }
 
   /// Copies the file at [path] into app storage and registers it. Used by both
@@ -78,7 +91,7 @@ class ImportService {
       {String? displayName,
       int? size,
       Future<bool> Function(String name)? confirmDuplicate,
-      void Function()? onConverting}) async {
+      void Function(ImportProgress)? onProgress}) async {
     final format = ModelFormat.fromExtension(_ext(path));
     if (format == null) {
       // Not natively parseable — but if it's a convertible format (.blend,
@@ -88,7 +101,7 @@ class ImportService {
         return _importViaConversion(path, ext,
             displayName: displayName,
             confirmDuplicate: confirmDuplicate,
-            onConverting: onConverting);
+            onProgress: onProgress);
       }
       if (kUnsupportedCadExtensions.contains(ext)) {
         return ImportResult(ImportStatus.unsupported,
@@ -142,7 +155,7 @@ class ImportService {
   Future<ImportResult> _importViaConversion(String path, String ext,
       {String? displayName,
       Future<bool> Function(String name)? confirmDuplicate,
-      void Function()? onConverting}) async {
+      void Function(ImportProgress)? onProgress}) async {
     try {
       final source = File(path);
       final name =
@@ -162,14 +175,26 @@ class ImportService {
       final glb = conversionNeedsAsyncJob(
               bytes: bytes, ext: ext, syncMaxBytes: kSyncConvertMax)
           ? await (() async {
-              // Big file → async Job. Stream the upload, poll, then download the
-              // mobile-fit glb the Job produced.
-              onConverting?.call();
-              final jobId = await svc.enqueueLargeConversion(source, ext);
+              // Big file → async Job. Stream the upload (reporting %), poll,
+              // then download the mobile-fit glb the Job produced.
+              onProgress
+                  ?.call(const ImportProgress(ImportPhase.uploading, fraction: 0));
+              var lastPct = -1;
+              final jobId = await svc.enqueueLargeConversion(source, ext,
+                  onUploadProgress: (sent, total) {
+                if (total <= 0 || onProgress == null) return;
+                final pct = sent * 100 ~/ total;
+                if (pct == lastPct) return; // throttle to whole-percent steps
+                lastPct = pct;
+                onProgress(ImportProgress(ImportPhase.uploading,
+                    fraction: sent / total));
+              });
+              onProgress?.call(const ImportProgress(ImportPhase.converting));
               final status = await svc.awaitJob(jobId);
               if (!status.isDone || status.downloadUrl == null) {
                 throw ConversionException(status.error ?? 'Conversion failed.');
               }
+              onProgress?.call(const ImportProgress(ImportPhase.downloading));
               return svc.downloadJobGlb(status.downloadUrl!);
             })()
           : await svc.convertToGlb(source.readAsBytesSync(), ext);
