@@ -55,11 +55,20 @@ def norm_ext(ext):
 
 
 def _run_blender(src, out, timeout=None):
-    return subprocess.run(
-        ["blender", "--background", "--factory-startup",
-         "--python", "convert.py", "--", src, out],
-        capture_output=True, text=True, timeout=timeout or CONVERT_TIMEOUT_S,
-    )
+    try:
+        return subprocess.run(
+            ["blender", "--background", "--factory-startup",
+             "--python", "convert.py", "--", src, out],
+            capture_output=True, text=True, timeout=timeout or CONVERT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as e:
+        # subprocess.run discards the captured output when it times out — forward
+        # convert.py's [convert] phase lines so a timeout is DIAGNOSABLE (which
+        # phase ran long, base vs evaluated face counts) instead of just a bare
+        # "timed out after N seconds".
+        partial = (e.stderr or "") + "\n" + (e.stdout or "")
+        print("[blender:timeout]\n" + partial[-3000:], flush=True)
+        raise
 
 
 def _run_freecad(src, stl, timeout=None):

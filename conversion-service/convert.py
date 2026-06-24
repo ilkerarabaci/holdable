@@ -39,15 +39,44 @@ else:
 
 _log(f"loaded {ext} in {time.monotonic() - _t:.1f}s")
 
-# Decimate to a polygon budget. The glTF exporter is single-threaded Python and
-# is dominated by raw face count (diagnosis: a 49 MB .blend loaded in ~5s but
-# its export never finished in 7 min — load-fast, export-bound). A dense scene
-# would also be too heavy to render on a phone, so we cap faces: add a COLLAPSE
-# Decimate modifier sized to bring the total under CONVERT_TRI_BUDGET, then bake
-# it on export. Models already under budget are untouched.
+# Cap the polygon budget. The glTF exporter is single-threaded Python and is
+# dominated by raw face count, and export_apply bakes the FULL modifier stack
+# first — so a model whose faces explode under a Subdivision Surface (or
+# Array/Mirror) is exported at its evaluated density and blows the job timeout
+# (4Holdable2: 49 MB .blend, export timed out at 1500 s). Two guards, both
+# best-effort so a quirky model can never break the pipeline:
+#   1) Cap Subdivision Surface levels so the exporter never has to evaluate an
+#      exploded mesh (the dominant cost on detailed, modelled assets).
+#   2) Size the decimate on the EVALUATED (post-modifier) face count, not the
+#      base count — a low-base subsurf model otherwise skips decimation and then
+#      explodes on export. Was: base-count only, which missed exactly this case.
 TRI_BUDGET = int(os.environ.get("CONVERT_TRI_BUDGET", "400000"))
+SUBSURF_MAX = int(os.environ.get("CONVERT_SUBSURF_MAX", "2"))
 meshes = [o for o in bpy.data.objects if o.type == "MESH" and o.data]
-total_faces = sum(len(o.data.polygons) for o in meshes)
+
+capped = 0
+for o in meshes:
+    for m in list(o.modifiers):
+        if m.type == "SUBSURF":
+            try:
+                if m.render_levels > SUBSURF_MAX:
+                    m.render_levels = SUBSURF_MAX
+                    capped += 1
+                if m.levels > SUBSURF_MAX:
+                    m.levels = SUBSURF_MAX
+            except Exception as e:  # noqa: BLE001 - a modifier quirk must not abort
+                _log(f"subsurf cap failed on {o.name}: {e}")
+
+base_faces = sum(len(o.data.polygons) for o in meshes)
+try:
+    dg = bpy.context.evaluated_depsgraph_get()
+    total_faces = sum(len(o.evaluated_get(dg).data.polygons) for o in meshes)
+except Exception as e:  # noqa: BLE001
+    _log(f"evaluated face count failed, using base: {e}")
+    total_faces = base_faces
+_log(f"meshes={len(meshes)} base_faces={base_faces} eval_faces={total_faces} "
+     f"subsurf_capped={capped} budget={TRI_BUDGET}")
+
 decimated = False
 if total_faces > TRI_BUDGET and total_faces > 0:
     ratio = max(0.005, TRI_BUDGET / total_faces)
@@ -56,7 +85,7 @@ if total_faces > TRI_BUDGET and total_faces > 0:
         mod.decimate_type = "COLLAPSE"
         mod.ratio = ratio
     decimated = True
-    _log(f"decimating {total_faces} faces -> ratio {ratio:.4f}")
+    _log(f"decimating eval {total_faces} -> {TRI_BUDGET} (ratio {ratio:.4f})")
 
 # Export everything as a single binary glTF. export_apply bakes modifiers
 # (including our decimate) — forced on when we decimated so the reduction takes
