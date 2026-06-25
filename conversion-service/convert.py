@@ -54,10 +54,20 @@ TRI_BUDGET = int(os.environ.get("CONVERT_TRI_BUDGET", "400000"))
 SUBSURF_MAX = int(os.environ.get("CONVERT_SUBSURF_MAX", "2"))
 meshes = [o for o in bpy.data.objects if o.type == "MESH" and o.data]
 
+# Log every mesh's modifier stack + base face count FIRST — this runs before the
+# slow export, so even on a timeout it's forwarded (convert_core's
+# [blender:timeout]) and tells us EXACTLY what makes a model export-bound.
+for o in meshes:
+    mods = ",".join(m.type for m in o.modifiers) or "-"
+    _log(f"object '{o.name}': base_faces={len(o.data.polygons)} modifiers=[{mods}]")
+
+# Cap the subdivision modifiers (Subsurf AND Multires — the usual explosion
+# source on detailed / sculpted assets) so the exporter never bakes a giant
+# mesh. Guarded so a quirky modifier can't abort the pipeline.
 capped = 0
 for o in meshes:
     for m in list(o.modifiers):
-        if m.type == "SUBSURF":
+        if m.type in ("SUBSURF", "MULTIRES"):
             try:
                 if m.render_levels > SUBSURF_MAX:
                     m.render_levels = SUBSURF_MAX
@@ -65,7 +75,7 @@ for o in meshes:
                 if m.levels > SUBSURF_MAX:
                     m.levels = SUBSURF_MAX
             except Exception as e:  # noqa: BLE001 - a modifier quirk must not abort
-                _log(f"subsurf cap failed on {o.name}: {e}")
+                _log(f"cap failed on {o.name}/{m.type}: {e}")
 
 base_faces = sum(len(o.data.polygons) for o in meshes)
 try:
@@ -75,7 +85,7 @@ except Exception as e:  # noqa: BLE001
     _log(f"evaluated face count failed, using base: {e}")
     total_faces = base_faces
 _log(f"meshes={len(meshes)} base_faces={base_faces} eval_faces={total_faces} "
-     f"subsurf_capped={capped} budget={TRI_BUDGET}")
+     f"capped={capped} budget={TRI_BUDGET}")
 
 decimated = False
 if total_faces > TRI_BUDGET and total_faces > 0:
