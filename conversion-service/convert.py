@@ -87,6 +87,20 @@ except Exception as e:  # noqa: BLE001
 _log(f"meshes={len(meshes)} base_faces={base_faces} eval_faces={total_faces} "
      f"capped={capped} budget={TRI_BUDGET}")
 
+# Sidecar the diagnostic next to the output so job_worker can surface it in
+# status.json even on a timeout — the captured-stderr tail is unreliable. Written
+# now, BEFORE the slow decimate/export, so it always exists.
+try:
+    _diag = [f"meshes={len(meshes)} base={base_faces} eval={total_faces} "
+             f"capped={capped} budget={TRI_BUDGET}"]
+    for _o in meshes:
+        _mods = ",".join(_m.type for _m in _o.modifiers) or "-"
+        _diag.append(f"{_o.name}: base={len(_o.data.polygons)} mods=[{_mods}]")
+    with open(os.path.join(os.path.dirname(out), "diag.txt"), "w") as _f:
+        _f.write("\n".join(_diag))
+except Exception as _e:  # noqa: BLE001
+    _log(f"diag write failed: {_e}")
+
 decimated = False
 if total_faces > TRI_BUDGET and total_faces > 0:
     ratio = max(0.005, TRI_BUDGET / total_faces)

@@ -29,9 +29,12 @@ import convert_core as core
 JOB_ID = os.environ["JOB_ID"]
 BUCKET = os.environ.get("JOB_BUCKET") or core.BUCKET_NAME
 PREFIX = f"jobs/{JOB_ID}"
-# Jobs aren't request-bound; allow a long conversion (Cloud Run Job task-timeout
-# is the real ceiling). Stay an env knob so it's tunable on redeploy.
-JOB_CONVERT_TIMEOUT_S = int(os.environ.get("JOB_CONVERT_TIMEOUT_S", "1500"))
+# Per-conversion Blender timeout. NOTE: the /jobs trigger passes per-execution
+# containerOverrides.env (JOB_ID/JOB_BUCKET) which REPLACE the job's env — so the
+# deploy-time JOB_CONVERT_TIMEOUT_S never reaches here and this DEFAULT is what
+# actually applies. Set short (240s) for fast #9 diagnosis; raise once the
+# export-bound cause is fixed (and ideally fix the env-forwarding in server.py).
+JOB_CONVERT_TIMEOUT_S = int(os.environ.get("JOB_CONVERT_TIMEOUT_S", "240"))
 
 
 def _bucket():
@@ -47,6 +50,17 @@ def _write_status(b, status):
     status["updatedAt"] = _now()
     b.blob(f"{PREFIX}/status.json").upload_from_string(
         json.dumps(status), content_type="application/json")
+
+
+def _read_diag(work):
+    """The modifier-stack / face-count sidecar convert.py writes before the slow
+    export — surfaced in status.json so a timeout is diagnosable without digging
+    through Cloud Run logs."""
+    try:
+        p = os.path.join(work, "diag.txt")
+        return open(p).read()[-4000:] if os.path.exists(p) else ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def main():
@@ -87,11 +101,12 @@ def main():
                       outputBytes=os.path.getsize(out))
         _write_status(b, status)
     except core.ConvertError as e:
-        status.update(state="failed", phase="convert", error=e.message)
+        status.update(state="failed", phase="convert", error=e.message,
+                      diag=_read_diag(work))
         _write_status(b, status)
     except Exception as e:  # noqa: BLE001
         # Always leave a terminal status so the client stops polling.
-        status.update(state="failed", error=str(e))
+        status.update(state="failed", error=str(e), diag=_read_diag(work))
         try:
             _write_status(b, status)
         except Exception:  # noqa: BLE001
