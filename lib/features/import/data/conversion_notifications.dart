@@ -26,10 +26,13 @@ class ConversionNotifications {
   /// NOT foregrounded. Failures are swallowed: a missed notification must not
   /// fail the import that triggered it.
   static Future<void> notifyIfBackgrounded(String title, String body) async {
-    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
-      return;
-    }
     try {
+      // Whole body guarded: WidgetsBinding.instance itself throws when no
+      // binding exists (plain-Dart test / background isolate) — that must not
+      // fail the import either.
+      if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+        return;
+      }
       await _ch.invokeMethod('show', {'title': title, 'body': body});
     } catch (_) {/* best-effort */}
   }
