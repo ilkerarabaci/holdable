@@ -45,9 +45,23 @@ bool conversionNeedsAsyncJob({
 /// Base URL of the conversion service (Cloud Run, europe-west3). Public HTTPS,
 /// so any device can convert without the dev PC. For local-Docker dev, point
 /// this at the dev machine's LAN IP (and re-enable cleartext in the manifest).
-// TODO(convert): move to build/remote config; add auth before a real launch.
 const String kConversionBaseUrl =
     'https://holdable-convert-872321921378.europe-west3.run.app';
+
+/// Shared-secret API key for the conversion service, baked in at build time
+/// (`--dart-define=CONVERT_API_KEY=…`; CI reads it from a repo secret). Sent as
+/// `X-Api-Key` on every service request; empty ⇒ header omitted (works against
+/// a server with auth not configured). This is anti-abuse for a public Cloud
+/// Run URL (anyone with the URL can trigger paid Blender jobs), not real user
+/// auth — an APK-extracted key still works until rotated. Good enough pre-launch.
+const String kConversionApiKey =
+    String.fromEnvironment('CONVERT_API_KEY', defaultValue: '');
+
+/// Extensions gzipped for upload (#8): the upload is ~84% of a big import's
+/// wall clock and a .blend compresses 2-5x. Formats that are already containers
+/// (usdz = zip) gain nothing, so they upload raw. The worker detects the gzip
+/// magic and decompresses before converting.
+const Set<String> kGzipUploadExtensions = {'blend'};
 
 /// Cloud Run rejects HTTP/1 request bodies over 32 MiB at the ingress, so files
 /// up to this size POST straight to /convert; anything larger goes via GCS
@@ -185,6 +199,15 @@ class CancelledException implements Exception {}
 class ConversionService {
   const ConversionService();
 
+  /// Attaches the shared-secret key to a SERVICE request (never to the signed
+  /// GCS URLs — an extra header would break their V4 signature, and GCS access
+  /// is already scoped by the signature itself).
+  static void _auth(HttpClientRequest req) {
+    if (kConversionApiKey.isNotEmpty) {
+      req.headers.set('X-Api-Key', kConversionApiKey);
+    }
+  }
+
   Future<Uint8List> convertToGlb(Uint8List bytes, String ext) async {
     final e = ext.toLowerCase().replaceAll('.', '');
     if (bytes.length <= _kDirectPostMax) {
@@ -201,19 +224,48 @@ class ConversionService {
   /// [awaitJob]. Use when the file is too big for the synchronous path.
   Future<String> enqueueLargeConversion(File file, String ext,
       {void Function(int sent, int total)? onUploadProgress,
+      void Function(int done, int total)? onCompressProgress,
       CancelToken? cancel}) async {
     final e = ext.toLowerCase().replaceAll('.', '');
     final client = HttpClient()..connectionTimeout = _kConnectTimeout;
     // Cancel aborts the in-flight upload by force-closing the client; the
     // import layer maps the resulting error to ImportStatus.cancelled.
     cancel?.onCancel(() => client.close(force: true));
+    File? gz;
     try {
+      final origLen = await file.length();
+      // #8: gzip well-compressing formats to a temp file first (a .blend
+      // shrinks 2-5x, and the upload dominates a big import's wall clock).
+      // Staged to disk — not piped inline — so the PUT still has an exact
+      // contentLength (no chunked encoding against the signed URL) and the
+      // upload % stays meaningful. The worker detects the gzip magic.
+      var upload = file;
+      if (kGzipUploadExtensions.contains(e)) {
+        gz = File('${Directory.systemTemp.path}/'
+            'holdable_up_${DateTime.now().microsecondsSinceEpoch}.gz');
+        var read = 0;
+        final sink = gz.openWrite();
+        try {
+          await sink.addStream(file.openRead().map((chunk) {
+            if (cancel?.isCancelled ?? false) throw CancelledException();
+            read += chunk.length;
+            onCompressProgress?.call(read, origLen);
+            return chunk;
+          }).transform(gzip.encoder));
+        } finally {
+          try {
+            await sink.close();
+          } catch (_) {/* the addStream error is the one to surface */}
+        }
+        upload = gz;
+      }
       // First contact — retried, since a cold/scaled-to-zero service most often
       // fails right here (this is the request the user hit yesterday when the
       // import "couldn't upload").
       final signed = await retryTransient(() async {
         final urlReq = await client
             .postUrl(Uri.parse('$kConversionBaseUrl/jobs/upload-url?ext=$e'));
+        _auth(urlReq);
         final urlResp = await urlReq.close().timeout(_kCtlTimeout);
         final urlBody = await _collectString(urlResp);
         if (_isRetryableStatus(urlResp.statusCode)) {
@@ -228,7 +280,7 @@ class ConversionService {
         throw ConversionException('Conversion service error.');
       }
       // Stream the file to GCS from disk (content-type must match the signature).
-      final len = await file.length();
+      final len = await upload.length();
       final putReq = await client.putUrl(Uri.parse(uploadUrl));
       putReq.headers
           .set(HttpHeaders.contentTypeHeader, 'application/octet-stream');
@@ -236,7 +288,7 @@ class ConversionService {
       // Report upload progress as the file streams from disk (this is ~84% of
       // the total import time for a big model — surfaced as a % in the banner).
       var sent = 0;
-      await putReq.addStream(file.openRead().map((chunk) {
+      await putReq.addStream(upload.openRead().map((chunk) {
         sent += chunk.length;
         onUploadProgress?.call(sent, len);
         return chunk;
@@ -248,9 +300,10 @@ class ConversionService {
       }
       final jobReq =
           await client.postUrl(Uri.parse('$kConversionBaseUrl/jobs'));
+      _auth(jobReq);
       jobReq.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
-      jobReq.add(utf8
-          .encode(jsonEncode({'jobId': jobId, 'ext': e, 'origBytes': len})));
+      jobReq.add(utf8.encode(
+          jsonEncode({'jobId': jobId, 'ext': e, 'origBytes': origLen})));
       final jobResp = await jobReq.close().timeout(const Duration(seconds: 30));
       await _drain(jobResp);
       if (jobResp.statusCode != 202 && jobResp.statusCode != 200) {
@@ -261,6 +314,9 @@ class ConversionService {
       throw ConversionException('Conversion service unreachable.');
     } finally {
       client.close(force: true);
+      try {
+        gz?.deleteSync();
+      } catch (_) {/* temp cleanup is best-effort */}
     }
   }
 
@@ -271,6 +327,7 @@ class ConversionService {
       return await retryTransient(() async {
         final req =
             await client.getUrl(Uri.parse('$kConversionBaseUrl/jobs/$jobId'));
+        _auth(req);
         final resp = await req.close().timeout(_kCtlTimeout);
         final body = await _collectString(resp);
         if (_isRetryableStatus(resp.statusCode)) {
@@ -326,6 +383,7 @@ class ConversionService {
     final client = HttpClient()..connectionTimeout = _kConnectTimeout;
     try {
       final req = await client.postUrl(uri);
+      _auth(req);
       req.headers.set(HttpHeaders.contentTypeHeader, 'application/octet-stream');
       req.add(bytes);
       final resp = await req.close().timeout(const Duration(seconds: 240));
@@ -352,6 +410,7 @@ class ConversionService {
       // 1) Ask for a signed upload URL.
       final urlReq =
           await client.postUrl(Uri.parse('$kConversionBaseUrl/upload-url?ext=$e'));
+      _auth(urlReq);
       final urlResp = await urlReq.close().timeout(const Duration(seconds: 30));
       final urlBody = await _collectString(urlResp);
       if (urlResp.statusCode != 200) {
@@ -377,6 +436,7 @@ class ConversionService {
       // 3) Convert the uploaded object.
       final convReq =
           await client.postUrl(Uri.parse('$kConversionBaseUrl/convert-gcs'));
+      _auth(convReq);
       convReq.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       convReq.add(utf8.encode(jsonEncode({'objectName': objectName, 'ext': e})));
       final convResp = await convReq.close().timeout(const Duration(seconds: 300));

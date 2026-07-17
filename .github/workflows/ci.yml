@@ -52,7 +52,10 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: flutter build apk --debug
+      # CONVERT_API_KEY: shared-secret for the public conversion endpoint (repo
+      # secret; unset ⇒ empty ⇒ the app sends no key, matching a server with
+      # auth off — so enabling auth is a two-step, no-breakage rollout).
+      - run: flutter build apk --debug --dart-define=CONVERT_API_KEY=${{ secrets.CONVERT_API_KEY }}
       - uses: actions/upload-artifact@v7
         with:
           name: holdable-debug-apk
@@ -85,7 +88,7 @@ jobs:
       # emits one APK per ABI containing only that ABI's libs — we ship arm64.
       # (Play distribution should use an AAB; this keeps the sideload APK lean.
       # Floor is ~73MB: two Filament renderers + Flutter engine + ARCore.)
-      - run: flutter build apk --profile --split-per-abi
+      - run: flutter build apk --profile --split-per-abi --dart-define=CONVERT_API_KEY=${{ secrets.CONVERT_API_KEY }}
       - uses: actions/upload-artifact@v7
         with:
           name: holdable-profile-apk

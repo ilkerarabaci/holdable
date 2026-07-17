@@ -261,11 +261,16 @@ class _ConvertingBannerContentState extends State<_ConvertingBannerContent> {
     final t = Theme.of(context).textTheme;
     final p = widget.progress.value;
     final phase = p?.phase ?? ImportPhase.uploading;
-    final pct = (phase == ImportPhase.uploading && p?.fraction != null)
+    // Compress (#8, client-side gzip) + upload both have a real 0..1 fraction.
+    final onDevice =
+        phase == ImportPhase.uploading || phase == ImportPhase.compressing;
+    final pct = (onDevice && p?.fraction != null)
         ? (p!.fraction! * 100).round()
         : null;
-    final inCloud = phase != ImportPhase.uploading;
+    final inCloud = !onDevice;
     final label = switch (phase) {
+      ImportPhase.compressing =>
+        pct != null ? 'Compressing $pct%' : 'Compressing…',
       ImportPhase.uploading => pct != null ? 'Uploading $pct%' : 'Uploading…',
       ImportPhase.converting => 'Converting in the cloud… · $_clock',
       ImportPhase.downloading => 'Downloading…',
@@ -310,9 +315,9 @@ class _ConvertingBannerContentState extends State<_ConvertingBannerContent> {
         ClipRRect(
           borderRadius: BorderRadius.circular(4),
           child: LinearProgressIndicator(
-            // Determinate while uploading; indeterminate once the file is in the
-            // cloud (the Job's internal % isn't observable).
-            value: phase == ImportPhase.uploading ? p?.fraction : null,
+            // Determinate while compressing/uploading; indeterminate once the
+            // file is in the cloud (the Job's internal % isn't observable).
+            value: onDevice ? p?.fraction : null,
             minHeight: 4,
             backgroundColor: c.borderHairline,
             valueColor:

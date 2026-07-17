@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
+import 'conversion_notifications.dart';
 import 'conversion_service.dart';
 
 /// Outcome of an import attempt, surfaced to the UI for feedback.
@@ -24,14 +25,16 @@ class ImportResult {
 
 /// Phase of an in-flight import that needs cloud conversion (the async Job
 /// path), surfaced to the UI so it can show real progress instead of an
-/// indeterminate spinner.
-enum ImportPhase { uploading, converting, downloading }
+/// indeterminate spinner. [compressing] is the client-side gzip staging pass
+/// before the upload (#8) — fast, but visible on a 300 MB file.
+enum ImportPhase { compressing, uploading, converting, downloading }
 
 class ImportProgress {
   const ImportProgress(this.phase, {this.fraction});
   final ImportPhase phase;
 
-  /// 0..1 during [ImportPhase.uploading]; null = indeterminate (cloud phases).
+  /// 0..1 during [ImportPhase.compressing]/[ImportPhase.uploading];
+  /// null = indeterminate (cloud phases).
   final double? fraction;
 }
 
@@ -164,10 +167,11 @@ class ImportService {
       Future<bool> Function(String name)? confirmDuplicate,
       void Function(ImportProgress)? onProgress,
       CancelToken? cancel}) async {
+    final name =
+        _baseName(displayName ?? path.split(Platform.pathSeparator).last);
+    var needsJob = false; // hoisted so the failure path can notify too (#6)
     try {
       final source = File(path);
-      final name =
-          _baseName(displayName ?? path.split(Platform.pathSeparator).last);
       final bytes = source.lengthSync();
       // Above the async ceiling we still refuse (don't burn upload data on an
       // absurd file). Otherwise: small, fast-converting files go in-request;
@@ -180,8 +184,13 @@ class ImportService {
             message: 'This file is ${mb}MB. The limit is ${cap}MB.');
       }
       const svc = ConversionService();
-      final glb = conversionNeedsAsyncJob(
-              bytes: bytes, ext: ext, syncMaxBytes: kSyncConvertMax)
+      needsJob = conversionNeedsAsyncJob(
+          bytes: bytes, ext: ext, syncMaxBytes: kSyncConvertMax);
+      // #6: a Job conversion runs for minutes and the user may background the
+      // app — ask for notification permission NOW (the moment it makes sense)
+      // so the "finished" notification below can actually land.
+      if (needsJob) await ConversionNotifications.ensurePermission();
+      final glb = needsJob
           ? await (() async {
               // Big file → async Job. Stream the upload (reporting %), poll,
               // then download the mobile-fit glb the Job produced.
@@ -190,7 +199,11 @@ class ImportService {
               var lastPct = -1;
               final jobId = await svc.enqueueLargeConversion(source, ext,
                   cancel: cancel,
-                  onUploadProgress: (sent, total) {
+                  onCompressProgress: (done, total) {
+                if (total <= 0 || onProgress == null) return;
+                onProgress(ImportProgress(ImportPhase.compressing,
+                    fraction: done / total));
+              }, onUploadProgress: (sent, total) {
                 if (total <= 0 || onProgress == null) return;
                 final pct = sent * 100 ~/ total;
                 if (pct == lastPct) return; // throttle to whole-percent steps
@@ -214,6 +227,10 @@ class ImportService {
       final result =
           await _saveGlb(glb, name, confirmDuplicate: confirmDuplicate);
       await _clearPending(); // resolved — nothing left to resume
+      if (needsJob && result.status == ImportStatus.added) {
+        await ConversionNotifications.notifyIfBackgrounded(
+            '$name is ready', 'Converted and added to your library.');
+      }
       return result;
     } on CancelledException {
       await _clearPending();
@@ -224,6 +241,10 @@ class ImportService {
       // it as a cancellation, not a failure, when the token says so.
       if (cancel?.isCancelled ?? false) {
         return const ImportResult(ImportStatus.cancelled);
+      }
+      if (needsJob) {
+        await ConversionNotifications.notifyIfBackgrounded(
+            "Couldn't convert $name", e.message);
       }
       return ImportResult(ImportStatus.error, message: e.message);
     } catch (e) {
@@ -324,6 +345,10 @@ class ImportService {
       final result =
           await _saveGlb(glb, name, confirmDuplicate: confirmDuplicate);
       await _clearPending();
+      if (result.status == ImportStatus.added) {
+        await ConversionNotifications.notifyIfBackgrounded(
+            '$name is ready', 'Converted and added to your library.');
+      }
       return result;
     } on ConversionException catch (e) {
       await _clearPending();

@@ -7,6 +7,10 @@
          the network — now a Cloud Run HTTPS endpoint, so no cleartext needed.
          (For local-Docker dev over plain http, re-add usesCleartextTraffic.) -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- #6: local "conversion finished" notification (a cloud convert of a big
+         model runs minutes; the user backgrounds the app). Runtime-requested on
+         Android 13+ right when a cloud conversion starts. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="holdable"
         android:name="${applicationName}"
