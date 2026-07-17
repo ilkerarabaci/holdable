@@ -21,8 +21,11 @@ import 'threemf_parser.dart';
 ///
 ///   [ px, py, pz,  nx, ny, nz,  u, v,  r, g, b, a ]
 ///
-/// Vertex colors are always opaque white so the material's `baseColorFactor`
-/// drives the rendered color (UnlitMaterial multiplies the two).
+/// Vertex colors are opaque white for the single-color formats (obj/stl/…) so
+/// the material's `baseColorFactor` drives the rendered color. The glTF parser
+/// bakes each primitive's material baseColorFactor into these slots instead
+/// (see [MeshData.hasVertexColors]) so a multi-material model keeps its
+/// per-part colors through the single merged mesh.
 const int kFloatsPerVertex = 12;
 
 /// Axis-aligned bounding box of a parsed mesh, used to frame the camera.
@@ -62,7 +65,16 @@ class MeshData {
     this.baseColorArgb,
     this.textureBytes,
     this.hadAuthoredNormals = true,
+    this.hasVertexColors = false,
   });
+
+  /// Whether the vertex color slots carry meaningful per-vertex colors (≥2
+  /// distinct per-material base colors baked by the glTF parser) rather than
+  /// the all-white default. The viewer uses this to render with a
+  /// vertex-color-sampling material so a merged multi-material model shows its
+  /// per-part colors. Values are LINEAR RGBA (Filament multiplies the COLOR
+  /// attribute into baseColor in linear space).
+  final bool hasVertexColors;
 
   /// Whether the source file carried its own normals. False when the parser
   /// computed smooth normals as a fallback — the viewer uses this to pick a
