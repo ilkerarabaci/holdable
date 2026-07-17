@@ -18,6 +18,7 @@ The size win is the tight CONVERT_TRI_BUDGET passed via env, not codec compressi
 """
 
 import datetime
+import gzip
 import json
 import os
 import shutil
@@ -29,12 +30,14 @@ import convert_core as core
 JOB_ID = os.environ["JOB_ID"]
 BUCKET = os.environ.get("JOB_BUCKET") or core.BUCKET_NAME
 PREFIX = f"jobs/{JOB_ID}"
-# Per-conversion Blender timeout. NOTE: the /jobs trigger passes per-execution
-# containerOverrides.env (JOB_ID/JOB_BUCKET) which REPLACE the job's env — so the
-# deploy-time JOB_CONVERT_TIMEOUT_S never reaches here and this DEFAULT is what
-# actually applies. Set short (240s) for fast #9 diagnosis; raise once the
-# export-bound cause is fixed (and ideally fix the env-forwarding in server.py).
-JOB_CONVERT_TIMEOUT_S = int(os.environ.get("JOB_CONVERT_TIMEOUT_S", "240"))
+# Per-conversion Blender timeout. server.py's /jobs trigger now FORWARDS this in
+# the per-execution containerOverrides.env (the override REPLACES the Job's
+# deploy-time env, so forwarding is the only way a tuned value reaches here — see
+# server.py _JOB_FORWARD_ENV). This default is just the safety net for a direct
+# `gcloud run jobs execute` with no override. Heavy real-world models (e.g. the
+# 49 MB, 3.2M-eval-face 4Holdable2.blend) legitimately need minutes, so keep it
+# generous rather than the 240s used transiently for #9 diagnosis.
+JOB_CONVERT_TIMEOUT_S = int(os.environ.get("JOB_CONVERT_TIMEOUT_S", "1500"))
 
 
 def _bucket():
@@ -50,6 +53,21 @@ def _write_status(b, status):
     status["updatedAt"] = _now()
     b.blob(f"{PREFIX}/status.json").upload_from_string(
         json.dumps(status), content_type="application/json")
+
+
+def _gunzip_if_needed(src):
+    """#8: the client gzips .blend uploads (they compress 2-5x and the upload
+    dominates the wall clock). Detect by the gzip magic, not a flag, so old
+    clients' raw uploads pass through untouched. A LEGACY gzip-compressed .blend
+    (old Blender's compressed save) also matches — decompressing it yields the
+    raw .blend, which Blender opens the same, so the transform is safe either way."""
+    with open(src, "rb") as fh:
+        if fh.read(2) != b"\x1f\x8b":
+            return
+    raw = src + ".raw"
+    with gzip.open(src, "rb") as fin, open(raw, "wb") as fout:
+        shutil.copyfileobj(fin, fout)
+    os.replace(raw, src)
 
 
 def _read_diag(work):
@@ -78,6 +96,7 @@ def main():
     try:
         src = os.path.join(work, "input" + ext)
         b.blob(f"{PREFIX}/input{ext}").download_to_filename(src)
+        _gunzip_if_needed(src)
 
         status["phase"] = "convert"
         _write_status(b, status)
@@ -98,7 +117,7 @@ def main():
             pass
 
         status.update(state="done", phase="done", outputObject=out_obj,
-                      outputBytes=os.path.getsize(out))
+                      outputBytes=os.path.getsize(out), diag=_read_diag(work))
         _write_status(b, status)
     except core.ConvertError as e:
         status.update(state="failed", phase="convert", error=e.message,

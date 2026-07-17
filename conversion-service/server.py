@@ -49,10 +49,41 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
 app.config["MAX_FORM_MEMORY_SIZE"] = 64 * 1024 * 1024
 
+# Shared-secret API key. The service URL is public (--allow-unauthenticated):
+# without this, anyone with the URL can trigger paid Blender jobs AND feed
+# untrusted .blend files to Blender. Set CONVERT_API_KEY on the Cloud Run
+# SERVICE (the Job never receives client traffic); the app bakes the same value
+# in via --dart-define and sends it as X-Api-Key. Unset ⇒ auth is OFF (local
+# Docker dev / staged rollout) — the health endpoint stays open either way.
+API_KEY = os.environ.get("CONVERT_API_KEY", "")
+
+
+@app.before_request
+def _require_api_key():
+    if not API_KEY or request.path == "/health":
+        return None
+    if request.headers.get("X-Api-Key") != API_KEY:
+        return jsonify(error="unauthorized"), 401
+    return None
+
 # Async Job (>200 MB) target — overridable via env on deploy.
 JOB_PROJECT = os.environ.get("JOB_PROJECT", "kerte-dev-prod")
 JOB_REGION = os.environ.get("JOB_REGION", "europe-west3")
 JOB_NAME = os.environ.get("JOB_NAME", "holdable-convert-job")
+
+# Conversion tunables FORWARDED into every Job execution. The RunJob override's
+# containerOverrides.env was observed to REPLACE the Job's deploy-time env (not
+# merge): the deploy-time CONVERT_TRI_BUDGET=150000 never reached the container,
+# so the job silently ran at convert.py's 400k default — confirmed by a failed
+# job's status.json diag ("budget=400000"). So the service is the single source
+# of truth and forwards these explicitly on every trigger, read from its own env
+# with mobile-fit defaults. Change them here (or via the service's env) — the
+# Job's own deploy-time values for these keys are ignored once the override runs.
+_JOB_FORWARD_ENV = {
+    "CONVERT_TRI_BUDGET": "150000",    # decimate target (mobile face budget)
+    "CONVERT_SUBSURF_MAX": "1",        # cap Subsurf/Multires levels pre-export
+    "JOB_CONVERT_TIMEOUT_S": "1500",   # per-conversion Blender timeout (async Job)
+}
 
 
 def _iso_now():
@@ -179,18 +210,24 @@ def _valid_job_id(job_id):
 
 def _trigger_job(job_id):
     """Fire the Cloud Run Job for [job_id] via the Admin API (so no gcloud in
-    the image). Passes JOB_ID + JOB_BUCKET as per-execution env overrides. The
-    service SA needs run.jobs.run + iam.serviceAccountUser on the Job's SA."""
+    the image). The per-execution override REPLACES the Job's deploy-time env, so
+    we forward EVERYTHING the worker needs: the per-job JOB_ID/JOB_BUCKET plus the
+    conversion tunables (_JOB_FORWARD_ENV) — otherwise convert.py falls back to its
+    in-code defaults (the 400k-budget bug). The service SA needs run.jobs.run +
+    iam.serviceAccountUser on the Job's SA."""
     from google import auth
     from google.auth.transport.requests import AuthorizedSession
     creds, _ = auth.default()
     session = AuthorizedSession(creds)
     url = (f"https://run.googleapis.com/v2/projects/{JOB_PROJECT}"
            f"/locations/{JOB_REGION}/jobs/{JOB_NAME}:run")
-    body = {"overrides": {"containerOverrides": [{"env": [
+    env = [
         {"name": "JOB_ID", "value": job_id},
         {"name": "JOB_BUCKET", "value": BUCKET_NAME},
-    ]}]}}
+    ]
+    for _k, _default in _JOB_FORWARD_ENV.items():
+        env.append({"name": _k, "value": os.environ.get(_k, _default)})
+    body = {"overrides": {"containerOverrides": [{"env": env}]}}
     resp = session.post(url, json=body, timeout=30)
     if resp.status_code >= 300:
         raise ConvertError(
