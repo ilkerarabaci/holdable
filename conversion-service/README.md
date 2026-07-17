@@ -27,6 +27,26 @@ curl http://localhost:8080/health
 curl -F file=@model.blend http://localhost:8080/convert -o out.glb
 ```
 
+### Iterate on convert.py for free (Dockerfile.test)
+
+Every cloud round-trip (build + Job run) costs real money — validate conversion
+changes locally first. `Dockerfile.test` is a minimal python-slim + Blender
+image (no FreeCAD/gunicorn, fast build) that runs `convert.py` directly:
+
+```bash
+docker build -f conversion-service/Dockerfile.test -t holdable-convert:test conversion-service/
+# (Git Bash) MSYS_NO_PATHCONV=1 stops /data being mangled into C:\...\data
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -e CONVERT_TRI_BUDGET=150000 -e CONVERT_SUBSURF_MAX=1 \
+  -v "<dir-without-spaces>:/data" holdable-convert:test \
+  blender --background --factory-startup --python /app/convert.py -- \
+  /data/in.blend /data/out.glb
+```
+
+Watch the `[phase]`/`[mesh]` stderr lines — per-phase and per-heavy-mesh timing
+plus `diag.txt` pinpoint any slow mesh by name. Rebuild the image after every
+convert.py change (it's COPY'd in).
+
 Generate a throwaway test `.blend` (default cube scene) without Blender installed
 on the host — run it inside the image:
 
@@ -87,8 +107,62 @@ gcloud iam service-accounts add-iam-policy-binding \
 ```
 
 Verified end-to-end (test.blend → GCS → Job → status `done` → valid glb).
+
+> **Tunables live in server.py, not the Job deploy.** The RunJob override
+> (`containerOverrides.env`) *replaces* the Job's deploy-time env, so the Job's
+> own `--set-env-vars CONVERT_TRI_BUDGET/JOB_CONVERT_TIMEOUT_S` never reach the
+> running container (confirmed by a timed-out job's status `diag: budget=400000`
+> despite a 150k deploy). The service FORWARDS these on every trigger from
+> `_JOB_FORWARD_ENV` in [server.py](server.py) — change them there. The Job's
+> `--set-env-vars` above is only a fallback for a direct `gcloud run jobs execute`.
+
+**Gzip uploads (#8):** the app gzips `.blend` uploads before the GCS PUT (they
+compress 2-5×; the upload is ~84% of a big import's wall clock). The worker
+detects the gzip magic bytes and decompresses before converting — no flag, so
+raw uploads from older clients pass through unchanged.
+
 **Follow-ups:** texture downscale (`CONVERT_TEX_MAX`), fair-use throttling
-(`usage/*.json`), FCM push to replace polling, restart-survivable polling.
+(`usage/*.json`), FCM push to replace polling.
+
+## Security / cost hygiene (pre-launch)
+
+The service URL is **public** (`--allow-unauthenticated`): anyone with the URL
+can trigger paid Blender jobs and feed untrusted `.blend` files to Blender.
+Mitigation shipped in code: a shared-secret **API key** — `server.py` rejects
+requests without a matching `X-Api-Key` once `CONVERT_API_KEY` is set (unset =
+auth off, so rollout is two-step and can't brick the installed app).
+
+```bash
+# 1) Generate a key and set it on the SERVICE (the Job takes no client traffic)
+KEY=$(openssl rand -hex 24)
+gcloud run services update holdable-convert --region europe-west3 \
+  --update-env-vars CONVERT_API_KEY=$KEY
+# 2) Add the same value as the GitHub repo secret CONVERT_API_KEY —
+#    CI bakes it into the APK via --dart-define. Rebuild + reinstall, THEN
+#    step 1 can be enforced. (Key order: secret first, server second.)
+```
+
+This is anti-abuse, not user auth: a determined attacker can extract the key
+from the APK — rotate it (repeat both steps) if abused. Remaining hygiene, run
+occasionally:
+
+```bash
+# Old convert images (~1 GB Blender each) accumulate per build — keep the newest few
+gcloud artifacts docker images list \
+  europe-west3-docker.pkg.dev/kerte-dev-prod/holdable/convert \
+  --include-tags --sort-by=~UPDATE_TIME
+gcloud artifacts docker images delete <...>@sha256:<old-digest> --delete-tags
+
+# Confirm the tmp bucket expires uploads (1-day lifecycle: gcs_lifecycle.json)
+gsutil lifecycle get gs://holdable-convert-tmp-872321921378
+gsutil lifecycle set conversion-service/gcs_lifecycle.json gs://holdable-convert-tmp-872321921378
+```
+
+Still open (accepted for alpha, revisit at launch): the service + Job run as the
+**default compute SA** (broad project roles) — a dedicated least-privilege SA
+(`storage.objectAdmin` on the tmp bucket + `run.developer` on the Job +
+`iam.serviceAccountUser` + `serviceAccountTokenCreator` on itself) would contain
+a compromise of the public endpoint; and `max-instances=3` caps runaway cost.
 
 ## Status
 
@@ -97,7 +171,3 @@ Verified end-to-end (test.blend → GCS → Job → status `done` → valid glb)
 | `.blend` | ✅ Blender — device-verified end-to-end |
 | USD (`.usd/.usda/.usdc/.usdz`) | ✅ Blender — service-verified |
 | STEP/IGES (`.step/.stp/.iges/.igs`) | ✅ FreeCAD→STL→Blender — service-verified |
-
-**TODO before a real launch:** the endpoint is public + unauthenticated — add an
-API key / Cloud Run auth, and consider a non-prod GCP project. `max-instances=3`
-caps runaway cost for now.

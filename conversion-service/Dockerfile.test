@@ -1,0 +1,25 @@
+# Minimal LOCAL test image for convert.py iteration — python-slim + Blender only
+# (no FreeCAD, no gunicorn), builds in ~2 min vs the full service image. Used to
+# validate conversion fixes for FREE before any paid cloud deploy:
+#
+#   docker build -f Dockerfile.test -t holdable-convert:test .
+#   MSYS_NO_PATHCONV=1 docker run --rm \
+#     -e CONVERT_TRI_BUDGET=150000 -e CONVERT_SUBSURF_MAX=1 \
+#     -v "<dir-without-spaces>:/data" holdable-convert:test \
+#     blender --background --factory-startup --python /app/convert.py -- \
+#     /data/in.blend /data/out.glb
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libx11-6 libxi6 libxxf86vm1 libxfixes3 libxrender1 libxkbcommon0 \
+        libgl1 libsm6 libice6 xz-utils curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fL https://download.blender.org/release/Blender5.0/blender-5.0.1-linux-x64.tar.xz \
+        | tar -xJ -C /opt \
+    && mv /opt/blender-5.0.1-linux-x64 /opt/blender
+
+ENV PATH="/opt/blender:${PATH}"
+
+WORKDIR /app
+COPY convert.py ./

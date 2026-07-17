@@ -55,11 +55,26 @@ def norm_ext(ext):
 
 
 def _run_blender(src, out, timeout=None):
-    return subprocess.run(
-        ["blender", "--background", "--factory-startup",
-         "--python", "convert.py", "--", src, out],
-        capture_output=True, text=True, timeout=timeout or CONVERT_TIMEOUT_S,
-    )
+    try:
+        return subprocess.run(
+            ["blender", "--background", "--factory-startup",
+             "--python", "convert.py", "--", src, out],
+            capture_output=True, text=True, timeout=timeout or CONVERT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as e:
+        # subprocess.run discards the captured output when it times out — forward
+        # convert.py's [convert] phase lines so a timeout is DIAGNOSABLE (the
+        # per-object modifier stack + face counts) instead of a bare "timed out".
+        # NOTE: on timeout .stdout/.stderr come back as BYTES even with text=True
+        # (the decode only happens on a clean return), so decode defensively —
+        # the previous str-concat raised "can't concat str to bytes".
+        def _txt(x):
+            if isinstance(x, (bytes, bytearray)):
+                return x.decode("utf-8", "replace")
+            return x or ""
+        partial = _txt(e.stderr) + "\n" + _txt(e.stdout)
+        print("[blender:timeout]\n" + partial[-3000:], flush=True)
+        raise
 
 
 def _run_freecad(src, stl, timeout=None):

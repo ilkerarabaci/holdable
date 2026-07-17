@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -11,6 +12,7 @@ import '../../../app/theme/prism_colors.dart';
 import '../../../app/theme/prism_gradient.dart';
 import '../../../app/theme_controller.dart';
 import '../../../shared/utils/format.dart';
+import '../../import/data/conversion_service.dart';
 import '../../import/data/import_service.dart';
 import '../../import/data/sample_models.dart';
 import '../../import/domain/material_support.dart';
@@ -76,13 +78,24 @@ Future<void> _pickSample(BuildContext context, WidgetRef ref) async {
 /// Runs the file-picker import and shows feedback. Shared by the FAB and the
 /// import sheet's "Files" row.
 Future<void> _runImport(BuildContext context, WidgetRef ref) async {
+  // Drives the converting banner's live progress (upload % → cloud phases).
+  // Only conversions emit progress, so the banner is raised lazily on the
+  // first event — a plain native-format import shows no banner.
+  final progress = ValueNotifier<ImportProgress?>(null);
+  final cancel = CancelToken();
   final result = await ref.read(importServiceProvider).pickAndImport(
         confirmOversize: (size) => _confirmOversize(context, size),
         confirmDuplicate: (name) => _confirmDuplicate(context, name),
-        onConverting: () => _showConvertingBanner(context),
+        cancel: cancel,
+        onProgress: (p) {
+          if (progress.value == null && context.mounted) {
+            _showConvertingBanner(context, progress, onCancel: cancel.cancel);
+          }
+          progress.value = p;
+        },
       );
   if (!context.mounted) return;
-  // Clear any "converting…" banner before showing the final result.
+  // Clear the progress banner before showing the final result.
   final messenger = ScaffoldMessenger.of(context)..clearSnackBars();
   switch (result.status) {
     case ImportStatus.added:
@@ -170,44 +183,150 @@ Future<bool> _confirmDuplicate(BuildContext context, String name) async {
   return ok ?? false;
 }
 
-/// Persistent banner while a large file converts in the cloud (async Job path,
-/// >200 MB). Cleared when the import resolves (see _runImport).
-void _showConvertingBanner(BuildContext context) {
+/// Persistent banner while a large file converts in the cloud (async Job path).
+/// Shows live progress driven by [progress]: a determinate bar with % during
+/// the upload (the bulk of the wait), then indeterminate for the cloud
+/// convert/download phases. Cleared when the import resolves (see _runImport).
+void _showConvertingBanner(
+    BuildContext context, ValueNotifier<ImportProgress?> progress,
+    {VoidCallback? onCancel}) {
   final c = context.prism;
-  final t = Theme.of(context).textTheme;
   ScaffoldMessenger.of(context)
     ..clearSnackBars()
     ..showSnackBar(
       SnackBar(
         backgroundColor: c.surface,
         behavior: SnackBarBehavior.floating,
-        duration: const Duration(minutes: 10),
+        // Match the job poll window (awaitJob, 30 min) so the banner doesn't
+        // vanish mid-conversion on a slow, export-bound model.
+        duration: const Duration(minutes: 30),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(14),
           side: BorderSide(color: c.borderHairline),
         ),
-        content: Row(
+        content:
+            _ConvertingBannerContent(progress: progress, onCancel: onCancel),
+      ),
+    );
+}
+
+/// Banner body. Stateful so it can tick an elapsed clock once per second during
+/// the cloud convert/download phases: those report no sub-progress, so without
+/// a clock the banner sits on a static "Converting…" for minutes on a dense,
+/// export-bound model — which reads as frozen. The upload phase still shows the
+/// live %; the clock makes the long cloud phase visibly alive.
+class _ConvertingBannerContent extends StatefulWidget {
+  const _ConvertingBannerContent({required this.progress, this.onCancel});
+  final ValueNotifier<ImportProgress?> progress;
+  final VoidCallback? onCancel;
+
+  @override
+  State<_ConvertingBannerContent> createState() =>
+      _ConvertingBannerContentState();
+}
+
+class _ConvertingBannerContentState extends State<_ConvertingBannerContent> {
+  final Stopwatch _elapsed = Stopwatch()..start();
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.progress.addListener(_onChange);
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  void _onChange() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    widget.progress.removeListener(_onChange);
+    _ticker?.cancel();
+    _elapsed.stop();
+    super.dispose();
+  }
+
+  String get _clock {
+    final s = _elapsed.elapsed.inSeconds;
+    return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.prism;
+    final t = Theme.of(context).textTheme;
+    final p = widget.progress.value;
+    final phase = p?.phase ?? ImportPhase.uploading;
+    // Compress (#8, client-side gzip) + upload both have a real 0..1 fraction.
+    final onDevice =
+        phase == ImportPhase.uploading || phase == ImportPhase.compressing;
+    final pct = (onDevice && p?.fraction != null)
+        ? (p!.fraction! * 100).round()
+        : null;
+    final inCloud = !onDevice;
+    final label = switch (phase) {
+      ImportPhase.compressing =>
+        pct != null ? 'Compressing $pct%' : 'Compressing…',
+      ImportPhase.uploading => pct != null ? 'Uploading $pct%' : 'Uploading…',
+      ImportPhase.converting => 'Converting in the cloud… · $_clock',
+      ImportPhase.downloading => 'Downloading…',
+    };
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
           children: [
-            SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                valueColor:
-                    const AlwaysStoppedAnimation<Color>(PrismGradient.violet),
-              ),
-            ),
-            const SizedBox(width: 14),
             Expanded(
               child: Text(
-                'Converting your file in the cloud — you can keep using Holdable.',
+                '$label — you can keep using Holdable.',
                 style: t.bodyMedium?.copyWith(color: c.textPrimary),
               ),
             ),
+            if (widget.onCancel != null)
+              TextButton(
+                onPressed: widget.onCancel,
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: const Size(0, 32),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: Text(
+                  'Cancel',
+                  style: t.labelLarge?.copyWith(color: PrismGradient.violet),
+                ),
+              ),
           ],
         ),
-      ),
+        // After a minute on the cloud phase, set expectations: dense models are
+        // export-bound and can genuinely take a few minutes.
+        if (inCloud && _elapsed.elapsed.inSeconds >= 60) ...[
+          const SizedBox(height: 2),
+          Text(
+            'Detailed models can take a few minutes.',
+            style: t.labelSmall?.copyWith(color: c.textMuted),
+          ),
+        ],
+        const SizedBox(height: 10),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: LinearProgressIndicator(
+            // Determinate while compressing/uploading; indeterminate once the
+            // file is in the cloud (the Job's internal % isn't observable).
+            value: onDevice ? p?.fraction : null,
+            minHeight: 4,
+            backgroundColor: c.borderHairline,
+            valueColor:
+                const AlwaysStoppedAnimation<Color>(PrismGradient.violet),
+          ),
+        ),
+      ],
     );
+  }
 }
 
 /// PO #7 — after an import, tell the user how much of the model's appearance
@@ -260,11 +379,57 @@ void _showMaterialBalloon(BuildContext context, LibraryModel model) {
 
 /// Library: empty state when the wallet is empty, otherwise a grid of
 /// liquid-glass model cards. FAB opens the import sheet.
-class LibraryScreen extends ConsumerWidget {
+class LibraryScreen extends ConsumerStatefulWidget {
   const LibraryScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<LibraryScreen> createState() => _LibraryScreenState();
+}
+
+class _LibraryScreenState extends ConsumerState<LibraryScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // #4: if a large conversion was still running when the app last closed, its
+    // Cloud Run Job kept going server-side — resume it now. Post-frame so a
+    // ScaffoldMessenger is available for the progress banner.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _resumePending());
+  }
+
+  Future<void> _resumePending() async {
+    if (!mounted) return;
+    final progress = ValueNotifier<ImportProgress?>(null);
+    final result =
+        await ref.read(importServiceProvider).resumePendingConversion(
+      onProgress: (p) {
+        if (progress.value == null && mounted) {
+          _showConvertingBanner(context, progress);
+        }
+        progress.value = p;
+      },
+      confirmDuplicate: (name) => _confirmDuplicate(context, name),
+    );
+    if (result == null || !mounted) return; // nothing was pending
+    final messenger = ScaffoldMessenger.of(context)..clearSnackBars();
+    switch (result.status) {
+      case ImportStatus.added:
+        _showMaterialBalloon(context, result.model!);
+      case ImportStatus.duplicate:
+        messenger.showSnackBar(
+          SnackBar(content: Text(result.message ?? 'Already in your library')),
+        );
+      case ImportStatus.error:
+        messenger.showSnackBar(
+          SnackBar(content: Text(result.message ?? 'Import failed')),
+        );
+      case ImportStatus.cancelled:
+      case ImportStatus.unsupported:
+        break;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final models = ref.watch(libraryControllerProvider);
     final mode = ref.watch(themeControllerProvider);
     final isDark = mode == ThemeMode.dark;

@@ -1,5 +1,10 @@
 package app.holdable
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Debug
 import io.flutter.embedding.android.FlutterActivity
@@ -8,7 +13,36 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val gpuChannel = "holdable/gpu"
+    private val notifyChannel = "holdable/notify"
     private var handTracker: HandTracker? = null
+
+    /// #6: "conversion finished" heads-up while the app is backgrounded. Plain
+    /// android.app Notification (minSdk 28 ⇒ channels exist) via a MethodChannel
+    /// — no plugin, no desugaring, nothing new in the build. Dart gates on
+    /// lifecycle state + the POST_NOTIFICATIONS runtime grant.
+    private fun showNotification(title: String, body: String) {
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        nm.createNotificationChannel(
+            NotificationChannel(
+                "conversion", "Model conversion",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            )
+        )
+        val open = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val n = Notification.Builder(this, "conversion")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .build()
+        nm.notify(1001, n)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -60,6 +94,20 @@ class MainActivity : FlutterActivity() {
                                 "system" to stat("summary.system")
                             )
                         )
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, notifyChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "show" -> {
+                        showNotification(
+                            call.argument<String>("title") ?: "Holdable",
+                            call.argument<String>("body") ?: "",
+                        )
+                        result.success(true)
                     }
                     else -> result.notImplemented()
                 }

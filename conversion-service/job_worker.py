@@ -18,6 +18,7 @@ The size win is the tight CONVERT_TRI_BUDGET passed via env, not codec compressi
 """
 
 import datetime
+import gzip
 import json
 import os
 import shutil
@@ -29,8 +30,13 @@ import convert_core as core
 JOB_ID = os.environ["JOB_ID"]
 BUCKET = os.environ.get("JOB_BUCKET") or core.BUCKET_NAME
 PREFIX = f"jobs/{JOB_ID}"
-# Jobs aren't request-bound; allow a long conversion (Cloud Run Job task-timeout
-# is the real ceiling). Stay an env knob so it's tunable on redeploy.
+# Per-conversion Blender timeout. server.py's /jobs trigger now FORWARDS this in
+# the per-execution containerOverrides.env (the override REPLACES the Job's
+# deploy-time env, so forwarding is the only way a tuned value reaches here — see
+# server.py _JOB_FORWARD_ENV). This default is just the safety net for a direct
+# `gcloud run jobs execute` with no override. Heavy real-world models (e.g. the
+# 49 MB, 3.2M-eval-face 4Holdable2.blend) legitimately need minutes, so keep it
+# generous rather than the 240s used transiently for #9 diagnosis.
 JOB_CONVERT_TIMEOUT_S = int(os.environ.get("JOB_CONVERT_TIMEOUT_S", "1500"))
 
 
@@ -49,6 +55,32 @@ def _write_status(b, status):
         json.dumps(status), content_type="application/json")
 
 
+def _gunzip_if_needed(src):
+    """#8: the client gzips .blend uploads (they compress 2-5x and the upload
+    dominates the wall clock). Detect by the gzip magic, not a flag, so old
+    clients' raw uploads pass through untouched. A LEGACY gzip-compressed .blend
+    (old Blender's compressed save) also matches — decompressing it yields the
+    raw .blend, which Blender opens the same, so the transform is safe either way."""
+    with open(src, "rb") as fh:
+        if fh.read(2) != b"\x1f\x8b":
+            return
+    raw = src + ".raw"
+    with gzip.open(src, "rb") as fin, open(raw, "wb") as fout:
+        shutil.copyfileobj(fin, fout)
+    os.replace(raw, src)
+
+
+def _read_diag(work):
+    """The modifier-stack / face-count sidecar convert.py writes before the slow
+    export — surfaced in status.json so a timeout is diagnosable without digging
+    through Cloud Run logs."""
+    try:
+        p = os.path.join(work, "diag.txt")
+        return open(p).read()[-4000:] if os.path.exists(p) else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def main():
     b = _bucket()
     meta = json.loads(b.blob(f"{PREFIX}/meta.json").download_as_text())
@@ -64,6 +96,7 @@ def main():
     try:
         src = os.path.join(work, "input" + ext)
         b.blob(f"{PREFIX}/input{ext}").download_to_filename(src)
+        _gunzip_if_needed(src)
 
         status["phase"] = "convert"
         _write_status(b, status)
@@ -84,14 +117,15 @@ def main():
             pass
 
         status.update(state="done", phase="done", outputObject=out_obj,
-                      outputBytes=os.path.getsize(out))
+                      outputBytes=os.path.getsize(out), diag=_read_diag(work))
         _write_status(b, status)
     except core.ConvertError as e:
-        status.update(state="failed", phase="convert", error=e.message)
+        status.update(state="failed", phase="convert", error=e.message,
+                      diag=_read_diag(work))
         _write_status(b, status)
     except Exception as e:  # noqa: BLE001
         # Always leave a terminal status so the client stops polling.
-        status.update(state="failed", error=str(e))
+        status.update(state="failed", error=str(e), diag=_read_diag(work))
         try:
             _write_status(b, status)
         except Exception:  # noqa: BLE001

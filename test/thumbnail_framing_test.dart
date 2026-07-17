@@ -73,4 +73,42 @@ void main() {
     expect(model / (size * size), greaterThan(0.18),
         reason: 'front-on model fills the frame, not a sliver');
   });
+
+  test('70mm mild perspective renders a deep model without blowing up or '
+      'collapsing (perspective-divide is stable)', () {
+    // A box far deeper (Z ±4) than wide (X/Y ±1) stresses the perspective divide
+    // across a large depth range — a divide-by-near-zero or a missing camera
+    // distance would either blow the model up to fill everything or collapse it.
+    const size = 64;
+    final pos = Float32List.fromList(<double>[
+      -1, -1, -4, 1, -1, -4, 1, 1, -4, -1, 1, -4, // far face
+      -1, -1, 4, 1, -1, 4, 1, 1, 4, -1, 1, 4, // near face
+    ]);
+    final idx = <int>[
+      0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1, //
+      3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2,
+    ];
+    final buf = rasterizeThumbnail(
+      positions: pos,
+      indices: idx,
+      triangleCount: idx.length ~/ 3,
+      centerX: 0, centerY: 0, centerZ: 0,
+      minX: -1, minY: -1, minZ: -4,
+      maxX: 1, maxY: 1, maxZ: 4,
+      azimuth: kThumbnailAzimuth,
+      elevation: kThumbnailElevation,
+      size: size,
+      bgColor: 0xFF101014,
+      surfaceColor: 0x00D1D1DB,
+    )!;
+    var model = 0;
+    for (var i = 0; i < buf.length; i += 4) {
+      if (buf[i] > 60 && buf[i + 1] > 60 && buf[i + 2] > 60) model++;
+    }
+    final frac = model / (size * size);
+    expect(frac, greaterThan(0.10),
+        reason: 'deep model still frames (perspective divide did not collapse it)');
+    expect(frac, lessThan(0.92),
+        reason: 'deep model not blown up to fill the frame (divide stayed stable)');
+  });
 }

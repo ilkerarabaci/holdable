@@ -1,12 +1,16 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../library/data/library_controller.dart';
 import '../../library/domain/library_model.dart';
+import 'conversion_notifications.dart';
 import 'conversion_service.dart';
 
 /// Outcome of an import attempt, surfaced to the UI for feedback.
@@ -17,6 +21,21 @@ class ImportResult {
   final ImportStatus status;
   final LibraryModel? model;
   final String? message;
+}
+
+/// Phase of an in-flight import that needs cloud conversion (the async Job
+/// path), surfaced to the UI so it can show real progress instead of an
+/// indeterminate spinner. [compressing] is the client-side gzip staging pass
+/// before the upload (#8) — fast, but visible on a 300 MB file.
+enum ImportPhase { compressing, uploading, converting, downloading }
+
+class ImportProgress {
+  const ImportProgress(this.phase, {this.fraction});
+  final ImportPhase phase;
+
+  /// 0..1 during [ImportPhase.compressing]/[ImportPhase.uploading];
+  /// null = indeterminate (cloud phases).
+  final double? fraction;
 }
 
 /// Imports models into the wallet. Two entry points share one copy-and-register
@@ -38,7 +57,8 @@ class ImportService {
   Future<ImportResult> pickAndImport({
     Future<bool> Function(int sizeBytes)? confirmOversize,
     Future<bool> Function(String name)? confirmDuplicate,
-    void Function()? onConverting,
+    void Function(ImportProgress)? onProgress,
+    CancelToken? cancel,
   }) async {
     final FilePickerResult? result;
     try {
@@ -69,7 +89,8 @@ class ImportService {
         displayName: picked.name,
         size: picked.size,
         confirmDuplicate: confirmDuplicate,
-        onConverting: onConverting);
+        onProgress: onProgress,
+        cancel: cancel);
   }
 
   /// Copies the file at [path] into app storage and registers it. Used by both
@@ -78,7 +99,8 @@ class ImportService {
       {String? displayName,
       int? size,
       Future<bool> Function(String name)? confirmDuplicate,
-      void Function()? onConverting}) async {
+      void Function(ImportProgress)? onProgress,
+      CancelToken? cancel}) async {
     final format = ModelFormat.fromExtension(_ext(path));
     if (format == null) {
       // Not natively parseable — but if it's a convertible format (.blend,
@@ -88,7 +110,8 @@ class ImportService {
         return _importViaConversion(path, ext,
             displayName: displayName,
             confirmDuplicate: confirmDuplicate,
-            onConverting: onConverting);
+            onProgress: onProgress,
+            cancel: cancel);
       }
       if (kUnsupportedCadExtensions.contains(ext)) {
         return ImportResult(ImportStatus.unsupported,
@@ -142,11 +165,13 @@ class ImportService {
   Future<ImportResult> _importViaConversion(String path, String ext,
       {String? displayName,
       Future<bool> Function(String name)? confirmDuplicate,
-      void Function()? onConverting}) async {
+      void Function(ImportProgress)? onProgress,
+      CancelToken? cancel}) async {
+    final name =
+        _baseName(displayName ?? path.split(Platform.pathSeparator).last);
+    var needsJob = false; // hoisted so the failure path can notify too (#6)
     try {
       final source = File(path);
-      final name =
-          _baseName(displayName ?? path.split(Platform.pathSeparator).last);
       final bytes = source.lengthSync();
       // Above the async ceiling we still refuse (don't burn upload data on an
       // absurd file). Otherwise: small, fast-converting files go in-request;
@@ -159,48 +184,177 @@ class ImportService {
             message: 'This file is ${mb}MB. The limit is ${cap}MB.');
       }
       const svc = ConversionService();
-      final glb = conversionNeedsAsyncJob(
-              bytes: bytes, ext: ext, syncMaxBytes: kSyncConvertMax)
+      needsJob = conversionNeedsAsyncJob(
+          bytes: bytes, ext: ext, syncMaxBytes: kSyncConvertMax);
+      // #6: a Job conversion runs for minutes and the user may background the
+      // app — ask for notification permission NOW (the moment it makes sense)
+      // so the "finished" notification below can actually land.
+      if (needsJob) await ConversionNotifications.ensurePermission();
+      final glb = needsJob
           ? await (() async {
-              // Big file → async Job. Stream the upload, poll, then download the
-              // mobile-fit glb the Job produced.
-              onConverting?.call();
-              final jobId = await svc.enqueueLargeConversion(source, ext);
-              final status = await svc.awaitJob(jobId);
+              // Big file → async Job. Stream the upload (reporting %), poll,
+              // then download the mobile-fit glb the Job produced.
+              onProgress
+                  ?.call(const ImportProgress(ImportPhase.uploading, fraction: 0));
+              var lastPct = -1;
+              final jobId = await svc.enqueueLargeConversion(source, ext,
+                  cancel: cancel,
+                  onCompressProgress: (done, total) {
+                if (total <= 0 || onProgress == null) return;
+                onProgress(ImportProgress(ImportPhase.compressing,
+                    fraction: done / total));
+              }, onUploadProgress: (sent, total) {
+                if (total <= 0 || onProgress == null) return;
+                final pct = sent * 100 ~/ total;
+                if (pct == lastPct) return; // throttle to whole-percent steps
+                lastPct = pct;
+                onProgress(ImportProgress(ImportPhase.uploading,
+                    fraction: sent / total));
+              });
+              // Persist now: the Job runs server-side, so a kill/restart from
+              // here on can resume instead of losing the conversion (#4).
+              await _savePending(jobId, name);
+              onProgress?.call(const ImportProgress(ImportPhase.converting));
+              final status = await svc.awaitJob(jobId, cancel: cancel);
               if (!status.isDone || status.downloadUrl == null) {
                 throw ConversionException(status.error ?? 'Conversion failed.');
               }
-              return svc.downloadJobGlb(status.downloadUrl!);
+              onProgress?.call(const ImportProgress(ImportPhase.downloading));
+              return svc.downloadJobGlb(status.downloadUrl!, cancel: cancel);
             })()
           : await svc.convertToGlb(source.readAsBytesSync(), ext);
 
-      if (_isDuplicate(name, glb.length, ModelFormat.glb) &&
-          !await _confirmReimport(confirmDuplicate, name)) {
-        return ImportResult(ImportStatus.duplicate,
-            message: '"$name" is already in your library.');
+      final result =
+          await _saveGlb(glb, name, confirmDuplicate: confirmDuplicate);
+      await _clearPending(); // resolved — nothing left to resume
+      if (needsJob && result.status == ImportStatus.added) {
+        await ConversionNotifications.notifyIfBackgrounded(
+            '$name is ready', 'Converted and added to your library.');
       }
-      final docs = await getApplicationDocumentsDirectory();
-      final modelsDir = Directory('${docs.path}/models');
-      if (!modelsDir.existsSync()) modelsDir.createSync(recursive: true);
-
-      final now = DateTime.now();
-      final id = now.microsecondsSinceEpoch.toString();
-      final dest = '${modelsDir.path}/$id.glb';
-      await File(dest).writeAsBytes(glb);
-
-      final model = LibraryModel(
-        id: id,
-        name: name,
-        format: ModelFormat.glb,
-        sizeBytes: glb.length,
-        filePath: dest,
-        importedAt: now,
-      );
-      await ref.read(libraryControllerProvider.notifier).add(model);
-      return ImportResult(ImportStatus.added, model: model);
+      return result;
+    } on CancelledException {
+      await _clearPending();
+      return const ImportResult(ImportStatus.cancelled);
     } on ConversionException catch (e) {
+      await _clearPending();
+      // A force-closed client (cancel) surfaces as a transport error — classify
+      // it as a cancellation, not a failure, when the token says so.
+      if (cancel?.isCancelled ?? false) {
+        return const ImportResult(ImportStatus.cancelled);
+      }
+      if (needsJob) {
+        await ConversionNotifications.notifyIfBackgrounded(
+            "Couldn't convert $name", e.message);
+      }
       return ImportResult(ImportStatus.error, message: e.message);
     } catch (e) {
+      await _clearPending();
+      if (cancel?.isCancelled ?? false) {
+        return const ImportResult(ImportStatus.cancelled);
+      }
+      return ImportResult(ImportStatus.error, message: '$e');
+    }
+  }
+
+  /// Writes [glb] as a model named [name] and registers it in the wallet.
+  /// Shared by the conversion import path and the restart-resume path.
+  Future<ImportResult> _saveGlb(Uint8List glb, String name,
+      {Future<bool> Function(String name)? confirmDuplicate}) async {
+    if (_isDuplicate(name, glb.length, ModelFormat.glb) &&
+        !await _confirmReimport(confirmDuplicate, name)) {
+      return ImportResult(ImportStatus.duplicate,
+          message: '"$name" is already in your library.');
+    }
+    final docs = await getApplicationDocumentsDirectory();
+    final modelsDir = Directory('${docs.path}/models');
+    if (!modelsDir.existsSync()) modelsDir.createSync(recursive: true);
+
+    final now = DateTime.now();
+    final id = now.microsecondsSinceEpoch.toString();
+    final dest = '${modelsDir.path}/$id.glb';
+    await File(dest).writeAsBytes(glb);
+
+    final model = LibraryModel(
+      id: id,
+      name: name,
+      format: ModelFormat.glb,
+      sizeBytes: glb.length,
+      filePath: dest,
+      importedAt: now,
+    );
+    await ref.read(libraryControllerProvider.notifier).add(model);
+    return ImportResult(ImportStatus.added, model: model);
+  }
+
+  // --- Restart-resume of an in-flight large conversion (#4) ------------------
+  // The Cloud Run Job runs server-side, independent of the app. Persisting the
+  // jobId while it's in flight lets a kill/restart mid-conversion pick it back
+  // up instead of silently dropping the import.
+  static const String _kPendingKey = 'holdable_pending_conversion_v1';
+
+  Future<void> _savePending(String jobId, String name) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+          _kPendingKey, jsonEncode({'jobId': jobId, 'name': name}));
+    } catch (_) {/* persistence is best-effort */}
+  }
+
+  Future<void> _clearPending() async {
+    try {
+      await (await SharedPreferences.getInstance()).remove(_kPendingKey);
+    } catch (_) {/* best-effort */}
+  }
+
+  /// If a large conversion was still running when the app closed, resume polling
+  /// its Cloud Run Job, download the result and import it. Returns null when
+  /// nothing was pending. Call once on app/library start.
+  Future<ImportResult?> resumePendingConversion({
+    void Function(ImportProgress)? onProgress,
+    Future<bool> Function(String name)? confirmDuplicate,
+  }) async {
+    String? raw;
+    try {
+      raw = (await SharedPreferences.getInstance()).getString(_kPendingKey);
+    } catch (_) {
+      return null;
+    }
+    if (raw == null) return null;
+    String? jobId;
+    var name = 'Model';
+    try {
+      final j = jsonDecode(raw) as Map<String, dynamic>;
+      jobId = j['jobId'] as String?;
+      name = (j['name'] as String?) ?? name;
+    } catch (_) {/* corrupt record — cleared below */}
+    if (jobId == null) {
+      await _clearPending();
+      return null;
+    }
+    const svc = ConversionService();
+    try {
+      onProgress?.call(const ImportProgress(ImportPhase.converting));
+      final status = await svc.awaitJob(jobId);
+      if (!status.isDone || status.downloadUrl == null) {
+        await _clearPending();
+        return ImportResult(ImportStatus.error,
+            message: status.error ?? 'Conversion failed.');
+      }
+      onProgress?.call(const ImportProgress(ImportPhase.downloading));
+      final glb = await svc.downloadJobGlb(status.downloadUrl!);
+      final result =
+          await _saveGlb(glb, name, confirmDuplicate: confirmDuplicate);
+      await _clearPending();
+      if (result.status == ImportStatus.added) {
+        await ConversionNotifications.notifyIfBackgrounded(
+            '$name is ready', 'Converted and added to your library.');
+      }
+      return result;
+    } on ConversionException catch (e) {
+      await _clearPending();
+      return ImportResult(ImportStatus.error, message: e.message);
+    } catch (e) {
+      await _clearPending();
       return ImportResult(ImportStatus.error, message: '$e');
     }
   }
