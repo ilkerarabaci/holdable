@@ -46,6 +46,24 @@ container start + GCS I/O.
 
 Uçtan uca (dokunuş→kütüphane): tipik 2-4 dk; 4Holdable2 canlı ölçüm ~4 dk.
 
+## Kapasite: başlangıç modeli kaç kullanıcıyı kaldırır? (2026-07-20)
+
+Kullanıcı-başı sunucu maliyeti YALNIZ conversion'dır: kütüphane cihazda yaşar
+(görüntüleme/AR/tekrar açma = $0, kullanıcı sayısından bağımsız; 50 model ≈
+0.6-1.2 GB kullanıcının kendi diski).
+
+| Bütçe | Herkes 5 hakkını kullanırsa (kötü ay) | Gerçekçi (~2 conversion/ay) |
+|---|---:|---:|
+| $10/ay (bugünkü) | **~100 aktif kullanıcı** | ~250 |
+| $50/ay | ~500 | ~1.250 |
+| $100/ay | ~1.000 | ~2.500 |
+
+- Kısıt PARA, sistem değil: Job'lar paralel; 3 eşzamanlı işleyici bile saatte
+  ~70 conversion (günde ~1.700) kaldırır — bütçe çok daha önce biter.
+- Ölçek lineeri bozacak ilk şey **sosyal** (egress ~$0.12/GB) — Model C gereği
+  o noktada Pro geliri devreye girmiş olacak.
+- Ön şart: kullanıcı-başı fair-use sayacı (usage/*.json) — henüz yok, backlog.
+
 ## Pricing kararı (2026-07-17, Ilker)
 
 **Model C — aşamalı:** launch tamamen ücretsiz + fair-use (5 conversion/ay
