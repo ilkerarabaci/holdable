@@ -14,10 +14,13 @@ import 'model_parser.dart';
 /// buffer; scene/node hierarchy with TRS or matrix transforms; multiple
 /// meshes/primitives (merged); POSITION (+ NORMAL, else smooth-computed);
 /// TEXCOORD_0 (float or normalized ubyte/ushort); USHORT/UINT/UBYTE or
-/// non-indexed triangles. The base-color texture of the *largest* primitive
-/// (by triangle count) is extracted as encoded PNG/JPEG bytes so the viewer
-/// can show a textured model (e.g. a car with its livery); since primitives
-/// are merged into one mesh, other primitives' textures are dropped.
+/// non-indexed triangles. Each primitive's material baseColorFactor is baked
+/// into its vertices' color slots (linear RGB) so a multi-material model keeps
+/// per-part colors through the merge — [MeshData.hasVertexColors] flags when
+/// ≥2 distinct colors were baked. The base-color texture of the *largest*
+/// primitive (by triangle count) is extracted as encoded PNG/JPEG bytes so the
+/// viewer can show a textured model (e.g. a car with its livery); since
+/// primitives are merged into one mesh, other primitives' textures are dropped.
 /// Unsupported (clear error): Draco/meshopt compression, external `.bin`,
 /// non-triangles.
 class GltfParser {
@@ -137,10 +140,33 @@ class GltfParser {
     final textures = (gltf['textures'] as List?) ?? const [];
     final images = (gltf['images'] as List?) ?? const [];
     int? firstColorArgb;
+    // 8-bit-quantized keys of every per-primitive base color baked into the
+    // vertex color slots. ≥2 distinct keys → the model is multi-colored and
+    // MeshData.hasVertexColors tells the viewer to render the baked colors.
+    final bakedColorKeys = <int>{};
     // Base-color texture of the largest primitive (by triangle count) — the
     // best single texture to show on the merged mesh (e.g. a car body livery).
     Uint8List? textureBytes;
     var textureOwnerTris = -1;
+
+    // The primitive's material baseColorFactor as LINEAR rgb (glTF stores it
+    // linear, and Filament multiplies the COLOR vertex attribute into baseColor
+    // in linear space — no sRGB conversion here). White when absent (glTF
+    // default), matching the untinted rendering those primitives get today.
+    (double, double, double) baseColorFactorOf(Map<String, dynamic> prim) {
+      final mi = prim['material'];
+      if (mi is int && mi >= 0 && mi < materials.length) {
+        final pbr = (materials[mi] as Map<String, dynamic>?)?[
+            'pbrMetallicRoughness'] as Map<String, dynamic>?;
+        final bcf = pbr?['baseColorFactor'];
+        if (bcf is List && bcf.length >= 3) {
+          double ch(Object? v) =>
+              (v as num).toDouble().clamp(0.0, 1.0).toDouble();
+          return (ch(bcf[0]), ch(bcf[1]), ch(bcf[2]));
+        }
+      }
+      return (1.0, 1.0, 1.0);
+    }
 
     // Encoded PNG/JPEG bytes of a material's base-color texture, if present.
     Uint8List? extractBaseColorImage(int materialIndex) {
@@ -193,6 +219,15 @@ class GltfParser {
       }
       final attrs = prim['attributes'] as Map<String, dynamic>?;
       if (attrs == null || attrs['POSITION'] == null) return;
+      // Per-material base color, baked into this primitive's vertex color
+      // slots so the merged single mesh keeps per-part colors (a 33-material
+      // car reads as painted parts, not one uniform tint). Alpha stays 1 —
+      // OPAQUE rendering ignores it and x-ray's uniform alpha is applied via
+      // the material factor, not per vertex.
+      final (bakeR, bakeG, bakeB) = baseColorFactorOf(prim);
+      bakedColorKeys.add(((bakeR * 255).round() << 16) |
+          ((bakeG * 255).round() << 8) |
+          (bakeB * 255).round());
       final positions = readVec3(attrs['POSITION'] as int);
       final vCount = positions.length ~/ 3;
 
@@ -259,9 +294,9 @@ class GltfParser {
           ..add(normals[i * 3 + 2])
           ..add(uvs != null ? uvs[i * 2] : 0) // u
           ..add(uvs != null ? uvs[i * 2 + 1] : 0) // v
-          ..add(1) // r
-          ..add(1) // g
-          ..add(1) // b
+          ..add(bakeR) // r (linear, from the material's baseColorFactor)
+          ..add(bakeG) // g
+          ..add(bakeB) // b
           ..add(1); // a
       }
       for (final idx in localIdx) {
@@ -307,6 +342,7 @@ class GltfParser {
       baseColorArgb: firstColorArgb,
       textureBytes: textureBytes,
       hadAuthoredNormals: !anyComputedNormals,
+      hasVertexColors: bakedColorKeys.length >= 2,
     );
   }
 

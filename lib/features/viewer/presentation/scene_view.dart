@@ -119,10 +119,12 @@ class ModelSceneController {
 
 /// De-indexed flat-shaded copy of a prepared model (per-face normals).
 class _FlatModel {
-  _FlatModel(this.positions, this.normals, this.uvs, this.indices, this.indexType);
+  _FlatModel(this.positions, this.normals, this.uvs, this.colors, this.indices,
+      this.indexType);
   final Float32List positions;
   final Float32List normals;
   final Float32List uvs;
+  final Float32List? colors; // 4/vertex linear RGBA, null = no baked colors
   final List<int> indices;
   final IndexType indexType;
 }
@@ -540,6 +542,10 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   String _mode = 'solid';
   Color _baseColor = _kNeutral;
   bool _colorPicked = false; // user has chosen a color (vs the neutral default)
+  // Current material samples the baked per-material vertex colors (glTF
+  // multi-material models; see MeshData.hasVertexColors). While active the
+  // baseColorFactor is white so the per-part colors come through unmultiplied.
+  bool _vertexColorsActive = false;
   double _currentAlpha = 1.0; // 0.35 in x-ray
 
   /// Camera lens/projection preset (#9): '70mm' (default), '24mm', 'fisheye'
@@ -864,6 +870,12 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       final bool xray = mode == 'xray';
       _currentAlpha = xray ? _xrayAlpha : 1.0;
 
+      // Baked per-material vertex colors (glTF multi-material models): sampled
+      // in the triangle modes until the user picks their own color — the pick
+      // replaces the per-part colors (see _setColor), it doesn't tint them.
+      final bool vertexColors = !wireframe && p.colors != null && !_colorPicked;
+      _vertexColorsActive = vertexColors;
+
       // Geometry: triangles for solid/x-ray, line topology for wireframe.
       final Geometry geometry;
       if (wireframe) {
@@ -881,6 +893,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
           flat.indices,
           normals: flat.normals,
           uvs: flat.uvs,
+          colors: vertexColors ? flat.colors : null,
           indexType: flat.indexType,
         );
       } else {
@@ -889,6 +902,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
           p.indices,
           normals: p.normals,
           uvs: p.uvs,
+          colors: vertexColors ? p.colors : null,
           indexType: p.indexType,
         );
       }
@@ -920,6 +934,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         // the inside/under faces (OBJ/STL winding is inconsistent) stay black
         // and the color doesn't read on every surface.
         doubleSided: true,
+        hasVertexColors: vertexColors,
         hasBaseColorTexture: textured,
         baseColorUV: 0,
       );
@@ -1453,15 +1468,16 @@ class _ModelSceneViewState extends State<ModelSceneView> {
   }
 
   /// Writes the current base color (sRGB → linear) into [mi] at the mode alpha.
-  /// While a texture is active (and shown — not in wireframe) the factor is
-  /// white so the texture's own colors come through unmultiplied.
+  /// While a texture or the baked per-material vertex colors are active the
+  /// factor is white so the model's own colors come through unmultiplied.
   Future<void> _applyColorTo(MaterialInstance mi) async {
     final textured = _texture != null && _mode != 'wireframe';
+    final white = textured || _vertexColorsActive;
     await mi.setParameterFloat4(
       'baseColorFactor',
-      textured ? 1.0 : _srgbToLinear(_baseColor.r),
-      textured ? 1.0 : _srgbToLinear(_baseColor.g),
-      textured ? 1.0 : _srgbToLinear(_baseColor.b),
+      white ? 1.0 : _srgbToLinear(_baseColor.r),
+      white ? 1.0 : _srgbToLinear(_baseColor.g),
+      white ? 1.0 : _srgbToLinear(_baseColor.b),
       _currentAlpha,
     );
     // The gltfio ubershader defaults metallicFactor to 1.0 (glTF default). With
@@ -1482,6 +1498,14 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     // baseColorFactor and baseColorMap are mutually exclusive in the UI.
     if (_texEncoded != null) {
       await _clearTexture();
+      return;
+    }
+    // Baked per-material vertex colors need a rebuild, not a live factor swap:
+    // the material variant that samples COLOR would only *tint* them (blue on a
+    // red part reads black). The rebuild drops the variant (_colorPicked is now
+    // true) so the picked color replaces the per-part colors.
+    if (_vertexColorsActive) {
+      await _applyMode(_mode);
       return;
     }
     final mi = _material;
@@ -1655,6 +1679,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
     final positions = Float32List(n * 3);
     final normals = Float32List(n * 3);
     final uvs = Float32List(n * 2);
+    final colors = p.colors != null ? Float32List(n * 4) : null;
     for (var t = 0; t < tris; t++) {
       final a = p.indices[t * 3], b = p.indices[t * 3 + 1], c = p.indices[t * 3 + 2];
       // Face normal from the triangle's winding.
@@ -1683,6 +1708,13 @@ class _ModelSceneViewState extends State<ModelSceneView> {
         normals[dst * 3 + 2] = nz;
         uvs[dst * 2] = p.uvs[src * 2];
         uvs[dst * 2 + 1] = p.uvs[src * 2 + 1];
+        if (colors != null) {
+          final pc = p.colors!;
+          colors[dst * 4] = pc[src * 4];
+          colors[dst * 4 + 1] = pc[src * 4 + 1];
+          colors[dst * 4 + 2] = pc[src * 4 + 2];
+          colors[dst * 4 + 3] = pc[src * 4 + 3];
+        }
       }
     }
     final List<int> indices;
@@ -1702,7 +1734,7 @@ class _ModelSceneViewState extends State<ModelSceneView> {
       indices = i32;
       indexType = IndexType.UINT;
     }
-    return _FlatModel(positions, normals, uvs, indices, indexType);
+    return _FlatModel(positions, normals, uvs, colors, indices, indexType);
   }
 
   // --- Texture (parametric surface texture on any model) --------------------
@@ -1946,6 +1978,7 @@ class _PreparedModel {
     required this.positions,
     required this.normals,
     required this.uvs,
+    this.colors,
     required this.indices,
     required this.indexType,
     required this.vertexCount,
@@ -1977,6 +2010,11 @@ class _PreparedModel {
   final Float32List positions; // 3 floats / vertex
   final Float32List normals; // 3 floats / vertex
   final Float32List uvs; // 2 floats / vertex
+
+  /// Baked per-material vertex colors (4 floats / vertex, linear RGBA), only
+  /// when the source glTF had ≥2 distinct material base colors — null for
+  /// single-color models so they keep the plain factor-tinted path.
+  final Float32List? colors;
   final List<int> indices; // triangle indices (Uint16List or Uint32List)
   final IndexType indexType;
   final int vertexCount;
@@ -2007,11 +2045,12 @@ const int _kMaxTriangles = 350000;
 
 /// Reduced mesh from [_decimateMesh].
 class _DecimatedMesh {
-  _DecimatedMesh(this.positions, this.normals, this.uvs, this.indices,
-      this.vertexCount, this.triangleCount);
+  _DecimatedMesh(this.positions, this.normals, this.uvs, this.colors,
+      this.indices, this.vertexCount, this.triangleCount);
   final Float32List positions;
   final Float32List normals;
   final Float32List uvs;
+  final Float32List? colors; // 4/vertex linear RGBA, null when source had none
   final List<int> indices;
   final int vertexCount;
   final int triangleCount;
@@ -2029,6 +2068,7 @@ _DecimatedMesh _decimateMesh(
   Float32List positions,
   Float32List normals,
   Float32List uvs,
+  Float32List? colors,
   List<int> indices,
   int triangleCount,
   double minX,
@@ -2053,6 +2093,9 @@ _DecimatedMesh _decimateMesh(
   final sumPx = <double>[], sumPy = <double>[], sumPz = <double>[];
   final sumNx = <double>[], sumNy = <double>[], sumNz = <double>[];
   final sumU = <double>[], sumV = <double>[];
+  // Baked vertex colors averaged like the other attributes (a cell straddling
+  // a material boundary blends its parts' colors — acceptable at this scale).
+  final sumR = <double>[], sumG = <double>[], sumB = <double>[], sumA = <double>[];
   final count = <int>[];
 
   for (var i = 0; i < n; i++) {
@@ -2087,6 +2130,12 @@ _DecimatedMesh _decimateMesh(
       sumNz.add(0);
       sumU.add(0);
       sumV.add(0);
+      if (colors != null) {
+        sumR.add(0);
+        sumG.add(0);
+        sumB.add(0);
+        sumA.add(0);
+      }
       count.add(0);
     }
     oldToNew[i] = ni;
@@ -2098,6 +2147,12 @@ _DecimatedMesh _decimateMesh(
     sumNz[ni] += normals[i * 3 + 2];
     sumU[ni] += uvs[i * 2];
     sumV[ni] += uvs[i * 2 + 1];
+    if (colors != null) {
+      sumR[ni] += colors[i * 4];
+      sumG[ni] += colors[i * 4 + 1];
+      sumB[ni] += colors[i * 4 + 2];
+      sumA[ni] += colors[i * 4 + 3];
+    }
     count[ni]++;
   }
 
@@ -2105,6 +2160,7 @@ _DecimatedMesh _decimateMesh(
   final newPos = Float32List(nv * 3);
   final newNrm = Float32List(nv * 3);
   final newUv = Float32List(nv * 2);
+  final newCol = colors != null ? Float32List(nv * 4) : null;
   for (var j = 0; j < nv; j++) {
     final c = count[j].toDouble();
     newPos[j * 3] = sumPx[j] / c;
@@ -2122,6 +2178,12 @@ _DecimatedMesh _decimateMesh(
     newNrm[j * 3 + 2] = nz;
     newUv[j * 2] = sumU[j] / c;
     newUv[j * 2 + 1] = sumV[j] / c;
+    if (newCol != null) {
+      newCol[j * 4] = sumR[j] / c;
+      newCol[j * 4 + 1] = sumG[j] / c;
+      newCol[j * 4 + 2] = sumB[j] / c;
+      newCol[j * 4 + 3] = sumA[j] / c;
+    }
   }
 
   final tris = math.min(triangleCount, indices.length ~/ 3);
@@ -2139,7 +2201,8 @@ _DecimatedMesh _decimateMesh(
   }
   final List<int> idx =
       nv <= 0x10000 ? Uint16List.fromList(newIdx) : Uint32List.fromList(newIdx);
-  return _DecimatedMesh(newPos, newNrm, newUv, idx, nv, newIdx.length ~/ 3);
+  return _DecimatedMesh(
+      newPos, newNrm, newUv, newCol, idx, nv, newIdx.length ~/ 3);
 }
 
 _PreparedModel _prepareModelEntry(_ParseRequest req) {
@@ -2151,6 +2214,9 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
   final positions = Float32List(n * 3);
   final normals = Float32List(n * 3);
   final uvs = Float32List(n * 2);
+  // Baked per-material vertex colors (glTF multi-material) ride along only
+  // when the parser flagged them — single-color models skip the buffer.
+  final colors = mesh.hasVertexColors ? Float32List(n * 4) : null;
   for (var i = 0; i < n; i++) {
     final s = i * kFloatsPerVertex;
     positions[i * 3] = src[s];
@@ -2161,6 +2227,12 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
     normals[i * 3 + 2] = src[s + 5];
     uvs[i * 2] = src[s + 6];
     uvs[i * 2 + 1] = src[s + 7];
+    if (colors != null) {
+      colors[i * 4] = src[s + 8];
+      colors[i * 4 + 1] = src[s + 9];
+      colors[i * 4 + 2] = src[s + 10];
+      colors[i * 4 + 3] = src[s + 11];
+    }
   }
 
   // Models without authored UVs (STL/OFF/3MF, OBJ without vt, glTF without
@@ -2238,17 +2310,19 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
   var dPositions = positions;
   var dNormals = normals;
   var dUvs = uvs;
+  var dColors = colors;
   var dIndices = indices;
   var dIndexType = indexType;
   var dVertexCount = n;
   var dTriCount = mesh.triangleCount;
   if (mesh.triangleCount > _kMaxTriangles) {
-    final dec = _decimateMesh(positions, normals, uvs, indices,
+    final dec = _decimateMesh(positions, normals, uvs, colors, indices,
         mesh.triangleCount, b.minX, b.minY, b.minZ, b.sizeX, b.sizeY, b.sizeZ,
         _kMaxTriangles);
     dPositions = dec.positions;
     dNormals = dec.normals;
     dUvs = dec.uvs;
+    dColors = dec.colors;
     dIndices = dec.indices;
     dVertexCount = dec.vertexCount;
     dTriCount = dec.triangleCount;
@@ -2285,6 +2359,7 @@ _PreparedModel _prepareModelEntry(_ParseRequest req) {
     positions: dPositions,
     normals: dNormals,
     uvs: dUvs,
+    colors: dColors,
     indices: dIndices,
     indexType: dIndexType,
     vertexCount: dVertexCount,
