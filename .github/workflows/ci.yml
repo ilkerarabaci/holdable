@@ -11,6 +11,10 @@ on:
         description: "Also build a profile APK (for perf measurement)"
         type: boolean
         default: true
+      ios:
+        description: "iOS compile check (unsigned; macOS runner = 10x minutes)"
+        type: boolean
+        default: false
 
 env:
   FLUTTER_VERSION: "3.44.0"
@@ -94,3 +98,24 @@ jobs:
           name: holdable-profile-apk
           path: build/app/outputs/flutter-apk/app-arm64-v8a-profile.apk
           if-no-files-found: error
+
+  build-ios-check:
+    name: iOS compile check (unsigned)
+    # i0 de-risk spike: does the whole plugin stack (thermion native hooks,
+    # ar_flutter_plugin_2 pods, file_picker, drift/sqlite3) even COMPILE for
+    # iOS? Manual dispatch only — a macOS runner burns Actions minutes at 10x,
+    # so this must never run on every push.
+    needs: analyze-test
+    if: github.event_name == 'workflow_dispatch' && inputs.ios
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build ios --no-codesign --debug --dart-define=CONVERT_API_KEY=${{ secrets.CONVERT_API_KEY }}
+      # Surface the app bundle size in the job log (rough IPA-floor signal).
+      - run: du -sh build/ios/iphoneos/Runner.app || true
