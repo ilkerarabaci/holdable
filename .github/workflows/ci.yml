@@ -15,6 +15,10 @@ on:
         description: "iOS compile check (unsigned; macOS runner = 10x minutes)"
         type: boolean
         default: false
+      ios_sim:
+        description: "iOS Simulator smoke: boot app + screenshot (macOS 10x minutes)"
+        type: boolean
+        default: false
 
 env:
   FLUTTER_VERSION: "3.44.0"
@@ -119,3 +123,37 @@ jobs:
       - run: flutter build ios --no-codesign --debug --dart-define=CONVERT_API_KEY=${{ secrets.CONVERT_API_KEY }}
       # Surface the app bundle size in the job log (rough IPA-floor signal).
       - run: du -sh build/ios/iphoneos/Runner.app || true
+
+  ios-sim-smoke:
+    name: iOS Simulator smoke (no signing, no Apple account)
+    # i0.5: prove the app BOOTS on iOS without paying for a developer account —
+    # simulator builds need no codesigning. Boots an iPhone simulator on the
+    # macOS runner, installs the app, launches it and uploads a screenshot.
+    # Manual dispatch only (macOS = 10x minutes).
+    needs: analyze-test
+    if: github.event_name == 'workflow_dispatch' && inputs.ios_sim
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build ios --simulator --debug --dart-define=CONVERT_API_KEY=${{ secrets.CONVERT_API_KEY }}
+      - name: Boot simulator, install, launch, screenshot
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c "import json,sys;d=json.load(sys.stdin)['devices'];print(next(dev['udid'] for rt,devs in sorted(d.items(),reverse=True) if 'iOS' in rt for dev in devs if 'iPhone' in dev['name']))")
+          echo "using simulator $UDID"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" build/ios/iphonesimulator/Runner.app
+          xcrun simctl launch "$UDID" app.holdable
+          sleep 30
+          xcrun simctl io "$UDID" screenshot ios-sim-screenshot.png
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ios-sim-screenshot
+          path: ios-sim-screenshot.png
+          if-no-files-found: error
